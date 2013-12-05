@@ -403,9 +403,32 @@ class ReadCallAssemblyPhaser extends ReadCall {
    * @return An RDD containing called variants.
    */
   override def call (reads: RDD[ADAMRecord]): RDD[(ADAMVariant, List[ADAMGenotype])] = {
-    //log.info("Grouping reads by position.")
-    //val reads_by_pos = reads.groupBy(r => r.getPosition)
-    //log.info(reads_by_pos.count.toString + " reads to partition.")
-    null
+    return null
+    log.info("Grouping reads by position.")
+    val reads_by_pos = reads.groupBy(_.getStart).map(_._2)
+    log.info(reads_by_pos.count.toString + " reads to partition.")
+    // TODO(peter, 12/4) want to make a RDD[List[ADAMRecord]].
+    // See http://www.scala-lang.org/api/current/index.html#scala.collection.Iterator
+    // for tips (especially, .partition).
+    /*val regions = reads_by_pos.mapPartitions((it: Iterator[ADAMRecord]) => {
+      //var ref_haplotype: CharSequence = null
+      var window = new ArrayBuffer[ADAMRecord]
+      var window_pos: Long = -1
+      it.map(x => {
+        val pos = x.getStart
+        if (window_pos == -1 || pos - window_pos >= region_len) {
+          window.clear
+          window_pos = pos
+        }
+        else if (pos - window_pos < region_len) {
+          window.push(x)
+        }
+      })
+    })*/
+    val regions: RDD[List[ADAMRecord]] = null
+    regions.flatMap(region => {
+      val kmer_graph = assemble(region)
+      phaseAssembly(kmer_graph, null)
+    })
   }
 }
