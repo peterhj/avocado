@@ -14,15 +14,15 @@ classpathTypes ++= Set ("orbit")
 
 net.virtualvoid.sbt.graph.Plugin.graphSettings
 
-excludeFilter := "ReadFilterOnComplexity.scala"
-
 libraryDependencies ++= Seq(
   "org.apache.spark" %% "spark-core" % "0.8.0-incubating",
   "org.scalatest" %% "scalatest" % "1.9.1" % "test",
   "edu.berkeley.cs.amplab.adam" % "adam-format" % "0.5.0-SNAPSHOT",
   "edu.berkeley.cs.amplab.adam" % "adam-commands" % "0.5.0-SNAPSHOT",
   "args4j" % "args4j" % "2.0.23",
-  "commons-lang" % "commons-lang" % "2.6"
+  "commons-lang" % "commons-lang" % "2.6",
+  "variant" % "variant" % "1.93",
+  "tribble" % "tribble" % "1.93"
 )
 
 libraryDependencies ++= Seq(
@@ -36,7 +36,8 @@ resolvers ++= Seq(
   "Spray" at "http://repo.spray.cc",
   "Local" at "file:///Users/fnothaft/.m2/repository",
   "massie-maven" at "http://www.cs.berkeley.edu/~massie/maven/",
-  "apache" at "https://repository.apache.org/content/repositories/releases"
+  "apache" at "https://repository.apache.org/content/repositories/releases",
+  "hadoop-bam" at "http://hadoop-bam.sourceforge.net/maven/"
 )
 
 mergeStrategy in assembly := {
