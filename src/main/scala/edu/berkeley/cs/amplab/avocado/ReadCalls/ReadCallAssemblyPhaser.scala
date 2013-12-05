@@ -19,7 +19,7 @@ package edu.berkeley.cs.amplab.avocado.calls.reads
 import org.apache.spark.{SparkContext, Logging}
 import org.apache.spark.rdd.RDD
 import edu.berkeley.cs.amplab.adam.avro.{ADAMRecord, ADAMVariant, ADAMGenotype}
-import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet, PriorityQueue}
+import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet, PriorityQueue, StringBuilder}
 import scala.math._
 
 class HMMAlignment (_ref: CharSequence, _test: CharSequence, _ref_start: Int) {
@@ -139,9 +139,9 @@ class KmerPrefix(_string: CharSequence) {
 }
 
 // A kmer has a prefix of length k-1 and a unit length suffix.
-class Kmer (_prefix: KmerPrefix, _suffix: CharSequence, _left: KmerVertex, _right: KmerVertex) {
+class Kmer (_prefix: KmerPrefix, _suffix: Char, _left: KmerVertex, _right: KmerVertex) {
   val prefix: KmerPrefix = _prefix
-  val suffix: CharSequence = _suffix
+  val suffix: Char = _suffix
   var left: KmerVertex = _left
   var right: KmerVertex = _right
   var reads: HashSet[AssemblyRead] = new HashSet[AssemblyRead]
@@ -158,6 +158,17 @@ class KmerPath (_edges: ArrayBuffer[Kmer]) {
   var mult_sum: Int = 0
   for (e <- edges) {
     mult_sum += e.mult
+  }
+
+  def serialize(): CharSequence = {
+    var sb = new StringBuilder
+    for (i <- Array.range(0, edges(0).prefix.string.length)) {
+      sb += edges(0).prefix.string.charAt(i)
+    }
+    for (e <- edges) {
+      sb += e.suffix
+    }
+    sb
   }
 }
 
@@ -206,7 +217,7 @@ class KmerGraph (_klen: Int, _region_len: Int) {
     val ks = offsets.map(idx => {
       val prefix_str = r.record.sequence.subSequence(idx, idx + klen - 1)
       val prefix = prefixes.getOrElseUpdate(prefix_str, new KmerPrefix(prefix_str))
-      val suffix = r.record.sequence.subSequence(idx + klen - 1, idx + klen)
+      val suffix = r.record.sequence.charAt(idx + klen - 1)
       var k = new Kmer(prefix, suffix, source, sink)
       k.reads.add(r)
       kmers.getOrElseUpdate(k.prefix, new ArrayBuffer[Kmer]) += k
@@ -255,7 +266,7 @@ class KmerGraph (_klen: Int, _region_len: Int) {
   def connectGraph(): Unit = {
     for ((prefix, ks) <- kmers) {
       // For each prefix, each suffix has an arbitrary "canonical" kmer.
-      var canon_ks = new HashMap[CharSequence,Kmer]
+      var canon_ks = new HashMap[Char,Kmer]
       for (k <- ks) {
         var canon_k = canon_ks.getOrElseUpdate(k.suffix, k)
         if (k != canon_k) {
@@ -381,7 +392,7 @@ class ReadCallAssemblyPhaser extends ReadCall {
     kmer_graph
   }
 
-  def phaseAssembly(kmer_graph: KmerGraph): List[(ADAMVariant, List[ADAMGenotype])] = {
+  def phaseAssembly(kmer_graph: KmerGraph, ref: CharSequence): List[(ADAMVariant, List[ADAMGenotype])] = {
     null
   }
 
@@ -391,7 +402,10 @@ class ReadCallAssemblyPhaser extends ReadCall {
    * @param[in] pileupGroups An RDD containing reads.
    * @return An RDD containing called variants.
    */
-  override def call (pileupGroups: RDD [ADAMRecord]): RDD [(ADAMVariant, List[ADAMGenotype])] = {
+  override def call (reads: RDD[ADAMRecord]): RDD[(ADAMVariant, List[ADAMGenotype])] = {
+    //log.info("Grouping reads by position.")
+    //val reads_by_pos = reads.groupBy(r => r.getPosition)
+    //log.info(reads_by_pos.count.toString + " reads to partition.")
     null
   }
 }
