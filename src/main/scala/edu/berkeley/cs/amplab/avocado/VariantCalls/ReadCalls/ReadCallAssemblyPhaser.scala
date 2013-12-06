@@ -16,9 +16,9 @@
 
 package edu.berkeley.cs.amplab.avocado.calls.reads
 
+import edu.berkeley.cs.amplab.adam.avro.{ADAMRecord, ADAMVariant, ADAMGenotype}
 import org.apache.spark.{SparkContext, Logging}
 import org.apache.spark.rdd.RDD
-import edu.berkeley.cs.amplab.adam.avro.{ADAMRecord, ADAMVariant, ADAMGenotype}
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet, PriorityQueue, StringBuilder}
 import scala.math._
 
@@ -35,13 +35,11 @@ class HMMAlignment (_ref: CharSequence, _test: CharSequence, _ref_start: Int) {
   val mat_size = padded_test_len * padded_ref_len
 
   // TODO(peter, 12/4) HMM parameters from the snp_prob and indel_prob?
-  //val epsilon = 0.0
-  //val delta = 0.0
-  //val tau = 0.0
   val eta = -log10(1.0 + test_haplotype.length) // Note: want to use the _test_
-  // haplotype length here, not the ref length.
-  val d = -4.0
-  val e = -4.0
+                                                // haplotype length here, not
+                                                // the ref length.
+  val delta = -4.0
+  val epsilon = -4.0
 
   // TODO(peter, 12/3) using a default quality for now, should use read scores.
   val q_phred = 40
@@ -62,10 +60,10 @@ class HMMAlignment (_ref: CharSequence, _test: CharSequence, _ref_start: Int) {
   def computeLogLikelihood(): Double = {
     // TODO(peter, 12/4) shortcut b/w global and local alignment: use a custom
     // start position in the reference haplotype.
-    trace = new ArrayBuffer[Char]
-    matches = new ArrayBuffer[Double]
-    inserts = new ArrayBuffer[Double]
-    deletes = new ArrayBuffer[Double]
+    trace = new ArrayBuffer[Char](mat_size)
+    matches = new ArrayBuffer[Double](mat_size)
+    inserts = new ArrayBuffer[Double](mat_size)
+    deletes = new ArrayBuffer[Double](mat_size)
     matches(ref_start) = 2.0 * eta
     inserts(ref_start) = Double.NegativeInfinity
     deletes(ref_start) = Double.NegativeInfinity
@@ -80,12 +78,12 @@ class HMMAlignment (_ref: CharSequence, _test: CharSequence, _ref_start: Int) {
           val m_delete = deletes((i-1) * stride + (j-1))
           val m = m_prior + max(m_match, max(m_insert, m_delete))
 
-          val ins_match = matches((i-1) * stride + j) + d
-          val ins_insert = inserts((i-1) * stride + j) + e
+          val ins_match = matches((i-1) * stride + j) + delta
+          val ins_insert = inserts((i-1) * stride + j) + epsilon
           val ins = max(ins_match, ins_insert)
 
-          val del_match = matches(i * stride + (j-1)) + d
-          val del_delete = deletes(i * stride + (j-1)) + e
+          val del_match = matches(i * stride + (j-1)) + delta
+          val del_delete = deletes(i * stride + (j-1)) + epsilon
           val del = max(del_match, del_delete)
 
           val best = max(m, max(ins, del))
@@ -271,7 +269,7 @@ class KmerGraph (_klen: Int, _region_len: Int) {
   def connectGraph(): Unit = {
     // Consolidate equivalent kmers.
     for ((prefix, ks) <- kmers) {
-      // For each prefix, each suffix has an arbitrary "canonical" kmer.
+      // Each equivalent (prefix, suffix) pair has an arbitrary "canonical" kmer.
       var canon_ks = new HashMap[Char,Kmer]
       for (k <- ks) {
         var canon_k = canon_ks.getOrElseUpdate(k.suffix, k)
@@ -350,32 +348,6 @@ class KmerGraph (_klen: Int, _region_len: Int) {
     }
   }
 
-  def threadReads(): Unit = {
-    // TODO(peter, 11/27)
-    // Unwind "frayed rope" patterns using individual reads.
-    // At the moment, done directly on the kmer graph, but could also condense
-    // the kmer graph into the repeat graph, and thread on that.
-    var convergings = new HashMap[AssemblyRead,ArrayBuffer[Kmer]]
-    for ((_, ks) <- kmers) {
-      for (k <- ks) {
-        if (k.left.left.size > 1 &&
-            k.left.right.size == 1)
-        {
-          for (r <- k.reads) {
-            convergings.getOrElseUpdate(r, new ArrayBuffer[Kmer]) += k
-          }
-        }
-      }
-    }
-    for ((r, ks) <- convergings) {
-      for (k <- ks) {
-        // TODO(peter, 11/27)
-        // Find the diverging kmer, then duplicate all kmers in between, given
-        // sufficient evidence.
-      }
-    }
-  }
-
   //def threadMatePairs(): Unit = {
   //}
 
@@ -409,11 +381,17 @@ class ReadCallAssemblyPhaser extends ReadCall {
   val kmer_len = 20
   val region_len = 200
 
-  override def isCallable(): Boolean = {
-    true
+  def getReference(region: Seq[ADAMRecord]): CharSequence = {
+    // TODO(peter, 12/5) currently, get the reference subsequence from the
+    // MD tags of the ADAM records. Not entirely correct, because a region may
+    // not be completely covered by reads, in which case the MD tags are
+    // insufficient, so we ultimately want to resolve using the ref itself,
+    // and not just the reads.
+    null
   }
 
-  def regionIsActive(region: Seq[ADAMRecord]): Boolean = {
+  def regionIsActive(region: Seq[ADAMRecord], ref: CharSequence): Boolean = {
+    // TODO(peter, 12/5)
     true
   }
 
@@ -421,17 +399,16 @@ class ReadCallAssemblyPhaser extends ReadCall {
     var kmer_graph = new KmerGraph(kmer_len, region_len)
     kmer_graph.insertReads(region)
     kmer_graph.connectGraph()
-    //kmer_graph.removeSpurs()
+    //kmer_graph.removeSpurs() // TODO(peter, 11/27) debug: not doing spur removal atm.
     kmer_graph.enumerateAllPaths()
     kmer_graph
   }
 
-  def getRefSubsequence(region: Seq[ADAMRecord]): CharSequence = {
-    null
-  }
-
-  def phaseAssembly(kmer_graph: KmerGraph, ref: CharSequence): List[(ADAMVariant, List[ADAMGenotype])] = {
-    null
+  def phaseAssembly(region: Seq[ADAMRecord], kmer_graph: KmerGraph, ref: CharSequence): Seq[(ADAMVariant, List[ADAMGenotype])] = {
+    var variants = new ArrayBuffer[(ADAMVariant, List[ADAMGenotype])]
+    // TODO(peter, 12/5) make haplotypes from all_paths, score them w.r.t.
+    // the reads, and pick out the variants from the top scoring haplotypes.
+    variants
   }
 
   /**
@@ -440,17 +417,20 @@ class ReadCallAssemblyPhaser extends ReadCall {
    * @param[in] pileupGroups An RDD containing reads.
    * @return An RDD containing called variants.
    */
-  override def call (reads: RDD[ADAMRecord]): RDD[(ADAMVariant, List[ADAMGenotype])] = {
-    return null
+  override def call(reads: RDD[ADAMRecord]): RDD[(ADAMVariant, List[ADAMGenotype])] = {
     log.info("Grouping reads into active regions.")
     val active_regions = reads.groupBy(r => r.getStart / region_len)
-                              .filter(x => regionIsActive(x._2))
-                              .map(_._2)
+                              .map(x => (getReference(x._2), x._2))
+                              .filter(x => regionIsActive(x._2, x._1))
     log.info("Found " + active_regions.count.toString + " active regions.")
-    active_regions.flatMap(region => {
+    log.info("Calling variants with local assembly.")
+    active_regions.flatMap(x => {
+      val ref = x._1
+      val region = x._2
       val kmer_graph = assemble(region)
-      val ref = getRefSubsequence(region)
-      phaseAssembly(kmer_graph, ref)
+      phaseAssembly(region, kmer_graph, ref)
     })
   }
+
+  override def isCallable(): Boolean = true
 }
