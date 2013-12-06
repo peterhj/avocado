@@ -196,7 +196,7 @@ class KmerGraph (_klen: Int, _region_len: Int) {
   val spur_threshold: Int = klen // TODO(peter, 11/26) how to choose thresh?
 
   //var reads: HashMap[CharSequence,AssemblyRead] = null
-  var reads: List[AssemblyRead] = null
+  var reads: ArrayBuffer[AssemblyRead] = null
 
   // Convenient to explicitly have the graph source and sink.
   val source = new KmerVertex
@@ -207,7 +207,7 @@ class KmerGraph (_klen: Int, _region_len: Int) {
   var prefixes = new HashMap[CharSequence,KmerPrefix]
   var kmers = new HashMap[KmerPrefix,ArrayBuffer[Kmer]]
 
-  //var all_paths = new HashSet[KmerPath]
+  // Paths through the kmer graph are in order of decreasing total mult.
   var all_paths = new PriorityQueue[KmerPath]()(KmerPathOrdering)
 
   def insertReadKmers(r: AssemblyRead): Unit = {
@@ -241,8 +241,8 @@ class KmerGraph (_klen: Int, _region_len: Int) {
     r.kmers = ks
   }
 
-  def insertReads(read_group: List[ADAMRecord]): Unit = {
-    reads = read_group.map(x => new AssemblyRead(x))
+  def insertReads(read_group: Seq[ADAMRecord]): Unit = {
+    reads = ArrayBuffer(read_group.map(x => new AssemblyRead(x)) : _*)
     reads.map(r => insertReadKmers(r))
   }
 
@@ -383,9 +383,17 @@ class ReadCallAssemblyPhaser extends ReadCall {
   val kmer_len = 20
   val region_len = 200
 
-  def assemble(read_group: List[ADAMRecord]): KmerGraph = {
+  override def isCallable(): Boolean = {
+    true
+  }
+
+  def regionIsActive(region: Seq[ADAMRecord]): Boolean = {
+    true
+  }
+
+  def assemble(region: Seq[ADAMRecord]): KmerGraph = {
     var kmer_graph = new KmerGraph(kmer_len, region_len)
-    kmer_graph.insertReads(read_group)
+    kmer_graph.insertReads(region)
     kmer_graph.connectGraph()
     //kmer_graph.removeSpurs()
     kmer_graph.enumerateAllPaths()
@@ -404,29 +412,12 @@ class ReadCallAssemblyPhaser extends ReadCall {
    */
   override def call (reads: RDD[ADAMRecord]): RDD[(ADAMVariant, List[ADAMGenotype])] = {
     return null
-    log.info("Grouping reads by position.")
-    val reads_by_pos = reads.groupBy(_.getStart).map(_._2)
-    log.info(reads_by_pos.count.toString + " reads to partition.")
-    // TODO(peter, 12/4) want to make a RDD[List[ADAMRecord]].
-    // See http://www.scala-lang.org/api/current/index.html#scala.collection.Iterator
-    // for tips (especially, .partition).
-    /*val regions = reads_by_pos.mapPartitions((it: Iterator[ADAMRecord]) => {
-      //var ref_haplotype: CharSequence = null
-      var window = new ArrayBuffer[ADAMRecord]
-      var window_pos: Long = -1
-      it.map(x => {
-        val pos = x.getStart
-        if (window_pos == -1 || pos - window_pos >= region_len) {
-          window.clear
-          window_pos = pos
-        }
-        else if (pos - window_pos < region_len) {
-          window.push(x)
-        }
-      })
-    })*/
-    val regions: RDD[List[ADAMRecord]] = null
-    regions.flatMap(region => {
+    log.info("Grouping reads into active regions.")
+    //val regions: RDD[List[ADAMRecord]] = null
+    val regions = reads.groupBy(r => r.getStart / region_len).map(_._2)
+    val active_regions = regions.filter(region => regionIsActive(region))
+    log.info("Found " + active_regions.count.toString + " active regions.")
+    active_regions.flatMap(region => {
       val kmer_graph = assemble(region)
       phaseAssembly(kmer_graph, null)
     })
