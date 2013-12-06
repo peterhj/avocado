@@ -465,8 +465,16 @@ class ReadCallAssemblyPhaser extends ReadCall {
   }
 
   def regionIsActive(region: Seq[ADAMRecord], ref: String): Boolean = {
-    // TODO(peter, 12/5)
-    true
+    // TODO(peter, 12/6) a very naive active region criterion. Upgrade asap!
+    val active_likelihood_thresh = -2.0
+    for (r <- region) {
+      var hmm = new HMMAlignment(ref, r.getSequence.toString, 0)
+      val read_likelihood = hmm.computeLogLikelihood
+      if (read_likelihood < active_likelihood_thresh) {
+        return true
+      }
+    }
+    false
   }
 
   def assemble(region: Seq[ADAMRecord]): KmerGraph = {
