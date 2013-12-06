@@ -130,7 +130,7 @@ class HMMAlignment (_ref: CharSequence, _test: CharSequence, _ref_start: Int) {
 // For our purposes, a read is a list of kmers.
 class AssemblyRead (_record: ADAMRecord) {
   val record: ADAMRecord = _record
-  var kmers: ArrayBuffer[Kmer] = null
+  //var kmers: ArrayBuffer[Kmer] = null
 }
 
 // A kmer prefix is a string of length k-1.
@@ -146,6 +146,7 @@ class Kmer (_prefix: KmerPrefix, _suffix: Char, _left: KmerVertex, _right: KmerV
   var right: KmerVertex = _right
   var reads: HashSet[AssemblyRead] = new HashSet[AssemblyRead]
   var mult: Int = 1
+  var is_canon: Boolean = false
 }
 
 class KmerVertex {
@@ -205,7 +206,7 @@ class KmerGraph (_klen: Int, _region_len: Int) {
   // The actual kmer graph consists of unique K-1 prefixes and kmers connected
   // by vertices.
   var prefixes = new HashMap[CharSequence,KmerPrefix]
-  var kmers = new HashMap[KmerPrefix,ArrayBuffer[Kmer]]
+  var kmers = new HashMap[KmerPrefix,HashSet[Kmer]]
 
   // Paths through the kmer graph are in order of decreasing total mult.
   var all_paths = new PriorityQueue[KmerPath]()(KmerPathOrdering)
@@ -220,7 +221,7 @@ class KmerGraph (_klen: Int, _region_len: Int) {
       val suffix = r.record.sequence.charAt(idx + klen - 1)
       var k = new Kmer(prefix, suffix, source, sink)
       k.reads.add(r)
-      kmers.getOrElseUpdate(k.prefix, new ArrayBuffer[Kmer]) += k
+      kmers.getOrElseUpdate(k.prefix, new HashSet[Kmer]) += k
       k
     })
 
@@ -233,12 +234,14 @@ class KmerGraph (_klen: Int, _region_len: Int) {
       v.left.add(k1)
       v.right.add(k2)
     })
-    ks.head.left = source
-    ks.last.right = sink
-    source.right.add(ks.head)
-    sink.left.add(ks.last)
 
-    r.kmers = ks
+    // Add vertices at the ends.
+    ks.head.left = new KmerVertex
+    ks.head.left.right.add(ks.head)
+    ks.last.right = new KmerVertex
+    ks.last.left.left.add(ks.last)
+
+    //r.kmers = ks
   }
 
   def insertReads(read_group: Seq[ADAMRecord]): Unit = {
@@ -258,17 +261,21 @@ class KmerGraph (_klen: Int, _region_len: Int) {
   }
 
   def exciseKmer(k: Kmer): Unit = {
+    // TODO(peter, 11/27) for spur removal.
   }
 
   def exciseVertex(v: KmerVertex): Unit = {
+    // TODO(peter, 11/27) for spur removal.
   }
 
   def connectGraph(): Unit = {
+    // Consolidate equivalent kmers.
     for ((prefix, ks) <- kmers) {
       // For each prefix, each suffix has an arbitrary "canonical" kmer.
       var canon_ks = new HashMap[Char,Kmer]
       for (k <- ks) {
         var canon_k = canon_ks.getOrElseUpdate(k.suffix, k)
+        canon_k.is_canon = true
         if (k != canon_k) {
           // Consolidate equivalent kmers together (i.e., same prefix and suffix)
           // with additive mults. Also fixup the vertices.
@@ -278,6 +285,25 @@ class KmerGraph (_klen: Int, _region_len: Int) {
           exciseVertexKmer(canon_k.right, k)
           canon_k.reads ++= k.reads
           canon_k.mult += k.mult
+        }
+      }
+    }
+
+    // Remove non-canonical kmers.
+    for ((_, ks) <- kmers) {
+      // TODO(peter, 12/5) if we keep references to non-canon kmers (e.g., in
+      // AssemblyRead) we will have to get rid of those refs as well.
+      ks --= ks.filter(k => !k.is_canon)
+    }
+
+    // Connect kmers to the source/sink when valid.
+    for ((_, ks) <- kmers) {
+      for (k <- ks) {
+        if (k.left.left.size == 0) {
+          k.left = source
+        }
+        if (k.right.right.size == 0) {
+          k.right = sink
         }
       }
     }
@@ -400,6 +426,10 @@ class ReadCallAssemblyPhaser extends ReadCall {
     kmer_graph
   }
 
+  def getRefSubsequence(region: Seq[ADAMRecord]): CharSequence = {
+    null
+  }
+
   def phaseAssembly(kmer_graph: KmerGraph, ref: CharSequence): List[(ADAMVariant, List[ADAMGenotype])] = {
     null
   }
@@ -413,13 +443,14 @@ class ReadCallAssemblyPhaser extends ReadCall {
   override def call (reads: RDD[ADAMRecord]): RDD[(ADAMVariant, List[ADAMGenotype])] = {
     return null
     log.info("Grouping reads into active regions.")
-    //val regions: RDD[List[ADAMRecord]] = null
-    val regions = reads.groupBy(r => r.getStart / region_len).map(_._2)
-    val active_regions = regions.filter(region => regionIsActive(region))
+    val active_regions = reads.groupBy(r => r.getStart / region_len)
+                              .filter(x => regionIsActive(x._2))
+                              .map(_._2)
     log.info("Found " + active_regions.count.toString + " active regions.")
     active_regions.flatMap(region => {
       val kmer_graph = assemble(region)
-      phaseAssembly(kmer_graph, null)
+      val ref = getRefSubsequence(region)
+      phaseAssembly(kmer_graph, ref)
     })
   }
 }
