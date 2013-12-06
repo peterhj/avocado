@@ -17,14 +17,17 @@
 package edu.berkeley.cs.amplab.avocado.calls.reads
 
 import edu.berkeley.cs.amplab.adam.avro.{ADAMRecord, ADAMVariant, ADAMGenotype}
+import edu.berkeley.cs.amplab.adam.util.{MdTag}
+import net.sf.samtools.{Cigar, CigarOperator, CigarElement, TextCigarCodec}
 import org.apache.spark.{SparkContext, Logging}
-import org.apache.spark.rdd.RDD
-import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet, PriorityQueue, StringBuilder}
+import org.apache.spark.rdd.{RDD}
+import scala.collection.JavaConversions._
+import scala.collection.mutable.{ArrayBuffer, Buffer, HashMap, HashSet, PriorityQueue, StringBuilder}
 import scala.math._
 
-class HMMAlignment (_ref: CharSequence, _test: CharSequence, _ref_start: Int) {
-  val ref_haplotype: CharSequence = _ref
-  val test_haplotype: CharSequence = _test
+class HMMAlignment (_ref: String, _test: String, _ref_start: Int) {
+  val ref_haplotype: String = _ref
+  val test_haplotype: String = _test
 
   var ref_start = _ref_start
 
@@ -127,29 +130,29 @@ class HMMAlignment (_ref: CharSequence, _test: CharSequence, _ref_start: Int) {
 
 // For our purposes, a read is a list of kmers.
 class AssemblyRead (_record: ADAMRecord) {
-  val record: ADAMRecord = _record
+  val record = _record
   //var kmers: ArrayBuffer[Kmer] = null
 }
 
 // A kmer prefix is a string of length k-1.
-class KmerPrefix(_string: CharSequence) {
-  val string: CharSequence = _string
+class KmerPrefix(_string: String) {
+  val string = _string
 }
 
 // A kmer has a prefix of length k-1 and a unit length suffix.
 class Kmer (_prefix: KmerPrefix, _suffix: Char, _left: KmerVertex, _right: KmerVertex) {
-  val prefix: KmerPrefix = _prefix
-  val suffix: Char = _suffix
-  var left: KmerVertex = _left
-  var right: KmerVertex = _right
-  var reads: HashSet[AssemblyRead] = new HashSet[AssemblyRead]
+  val prefix = _prefix
+  val suffix = _suffix
+  var left = _left
+  var right = _right
+  var reads = new HashSet[AssemblyRead]
   var mult: Int = 1
   var is_canon: Boolean = false
 }
 
 class KmerVertex {
-  var left: HashSet[Kmer] = new HashSet[Kmer]
-  var right: HashSet[Kmer] = new HashSet[Kmer]
+  var left = new HashSet[Kmer]
+  var right = new HashSet[Kmer]
 }
 
 class KmerPath (_edges: ArrayBuffer[Kmer]) {
@@ -159,7 +162,7 @@ class KmerPath (_edges: ArrayBuffer[Kmer]) {
     mult_sum += e.mult
   }
 
-  def serialize(): CharSequence = {
+  def serialize(): String = {
     var sb = new StringBuilder
     for (i <- Array.range(0, edges(0).prefix.string.length)) {
       sb += edges(0).prefix.string.charAt(i)
@@ -167,7 +170,7 @@ class KmerPath (_edges: ArrayBuffer[Kmer]) {
     for (e <- edges) {
       sb += e.suffix
     }
-    sb
+    sb.toString
   }
 }
 
@@ -191,10 +194,10 @@ object KmerPathOrdering extends Ordering[KmerPath] {
 //}
 
 class KmerGraph (_klen: Int, _region_len: Int) {
-  val klen: Int = _klen
-  val spur_threshold: Int = klen // TODO(peter, 11/26) how to choose thresh?
+  val klen = _klen
+  val spur_threshold = klen // TODO(peter, 11/26) how to choose thresh?
 
-  //var reads: HashMap[CharSequence,AssemblyRead] = null
+  //var reads: HashMap[String,AssemblyRead] = null
   var reads: ArrayBuffer[AssemblyRead] = null
 
   // Convenient to explicitly have the graph source and sink.
@@ -203,7 +206,7 @@ class KmerGraph (_klen: Int, _region_len: Int) {
 
   // The actual kmer graph consists of unique K-1 prefixes and kmers connected
   // by vertices.
-  var prefixes = new HashMap[CharSequence,KmerPrefix]
+  var prefixes = new HashMap[String,KmerPrefix]
   var kmers = new HashMap[KmerPrefix,HashSet[Kmer]]
 
   // Paths through the kmer graph are in order of decreasing total mult.
@@ -211,12 +214,13 @@ class KmerGraph (_klen: Int, _region_len: Int) {
 
   def insertReadKmers(r: AssemblyRead): Unit = {
     // Construct L-K+1 kmers, initially connected to the source and sink.
-    val readlen = r.record.sequence.length
+    val read_seq = r.record.getSequence.toString
+    val readlen = read_seq.length
     val offsets = ArrayBuffer.range(0, readlen - klen + 1)
     val ks = offsets.map(idx => {
-      val prefix_str = r.record.sequence.subSequence(idx, idx + klen - 1)
+      val prefix_str = read_seq.substring(idx, idx + klen - 1)
       val prefix = prefixes.getOrElseUpdate(prefix_str, new KmerPrefix(prefix_str))
-      val suffix = r.record.sequence.charAt(idx + klen - 1)
+      val suffix = read_seq.charAt(idx + klen - 1)
       var k = new Kmer(prefix, suffix, source, sink)
       k.reads.add(r)
       kmers.getOrElseUpdate(k.prefix, new HashSet[Kmer]) += k
@@ -381,16 +385,86 @@ class ReadCallAssemblyPhaser extends ReadCall {
   val kmer_len = 20
   val region_len = 200
 
-  def getReference(region: Seq[ADAMRecord]): CharSequence = {
+  val cigar_codec = new TextCigarCodec
+
+  def getReadReference(read: ADAMRecord): String = {
+    // See: (https://github.com/bigdatagenomics/adam/blob/indel-realign/adam-commands/src/main/scala/edu/berkeley/cs/amplab/adam/util/MdTag.scala).
+    val mdtag = MdTag(read.getMismatchingPositions.toString, read.getStart)
+
+    val read_seq = read.getSequence.toString
+    val cigar = cigar_codec.decode(read.getCigar.toString)
+
+    var read_pos = 0
+    var ref_pos = 0
+    var reference = ""
+
+    val cigar_els: Buffer[CigarElement] = cigar.getCigarElements
+    for (el <- cigar_els) {
+      el.getOperator match {
+        case CigarOperator.M => {
+          for (i <- (0 until el.getLength)) {
+            mdtag.mismatchedBase(ref_pos) match {
+              case Some(b) => reference += b
+              case None => reference += read_seq(read_pos)
+            }
+            read_pos += 1
+            ref_pos += 1
+          }
+        }
+        case CigarOperator.D => {
+          for (i <- (0 until el.getLength)) {
+            mdtag.deletedBase(ref_pos) match {
+              case Some(b) => reference += b
+              case None => {}
+            }
+            ref_pos += 1
+          }
+        }
+        case CigarOperator.I => {
+          read_pos += el.getLength
+        }
+        case _ => {}
+      }
+    }
+
+    reference
+  }
+
+  def getReference(region: Seq[ADAMRecord]): String = {
     // TODO(peter, 12/5) currently, get the reference subsequence from the
     // MD tags of the ADAM records. Not entirely correct, because a region may
     // not be completely covered by reads, in which case the MD tags are
     // insufficient, so we ultimately want to resolve using the ref itself,
     // and not just the reads.
-    null
+    val pos_refs = (region.map(_.getStart), region.map(r => getReadReference(r)))
+                   .zipped.map((pos, ref) => (pos, ref))
+                   .sortBy(_._1)
+    val start_pos = pos_refs(0)._1
+    var reference = ""
+    for ((pos, ref) <- pos_refs) {
+      // Here's an explanatory picture:
+      //
+      // OK:   [-----ref-----)
+      //             [---read---)
+      //
+      // Skip: [-----ref-----)
+      //         [---read---)
+      //
+      // Bail: [-----ref-----)
+      //                         [---read---)
+      val rel_pos = pos - start_pos
+      val offset = reference.length - rel_pos.toInt
+      if (offset < 0) {
+        return ""
+      }
+      else if (offset >= 0) {
+        reference += ref.substring(offset, ref.length)
+      }
+    }
+    reference
   }
 
-  def regionIsActive(region: Seq[ADAMRecord], ref: CharSequence): Boolean = {
+  def regionIsActive(region: Seq[ADAMRecord], ref: String): Boolean = {
     // TODO(peter, 12/5)
     true
   }
@@ -398,13 +472,13 @@ class ReadCallAssemblyPhaser extends ReadCall {
   def assemble(region: Seq[ADAMRecord]): KmerGraph = {
     var kmer_graph = new KmerGraph(kmer_len, region_len)
     kmer_graph.insertReads(region)
-    kmer_graph.connectGraph()
-    //kmer_graph.removeSpurs() // TODO(peter, 11/27) debug: not doing spur removal atm.
-    kmer_graph.enumerateAllPaths()
+    kmer_graph.connectGraph
+    //kmer_graph.removeSpurs // TODO(peter, 11/27) debug: not doing spur removal atm.
+    kmer_graph.enumerateAllPaths
     kmer_graph
   }
 
-  def phaseAssembly(region: Seq[ADAMRecord], kmer_graph: KmerGraph, ref: CharSequence): Seq[(ADAMVariant, List[ADAMGenotype])] = {
+  def phaseAssembly(region: Seq[ADAMRecord], kmer_graph: KmerGraph, ref: String): Seq[(ADAMVariant, List[ADAMGenotype])] = {
     var variants = new ArrayBuffer[(ADAMVariant, List[ADAMGenotype])]
     // TODO(peter, 12/5) make haplotypes from all_paths, score them w.r.t.
     // the reads, and pick out the variants from the top scoring haplotypes.
