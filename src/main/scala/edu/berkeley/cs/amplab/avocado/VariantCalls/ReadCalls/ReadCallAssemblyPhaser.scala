@@ -25,22 +25,25 @@ import scala.collection.JavaConversions._
 import scala.collection.mutable.{ArrayBuffer, Buffer, HashMap, HashSet, PriorityQueue, StringBuilder}
 import scala.math._
 
-class HMMAlignment (_ref: String, _test: String, _ref_start: Int) {
-  val ref_haplotype: String = _ref
-  val test_haplotype: String = _test
+class HMMAligner {
+  var ref_haplotype: String = null
+  var test_haplotype: String = null
 
-  var ref_start = _ref_start
+  var ref_start = 0
 
-  val padded_ref_len = ref_haplotype.length + 1
-  val padded_test_len = test_haplotype.length + 1
+  var padded_ref_len = 0
+  var padded_test_len = 0
 
-  val stride = padded_ref_len
-  val mat_size = padded_test_len * padded_ref_len
+  var stride = 0
+  var mat_size = 0
+
+  var trace: ArrayBuffer[Char] = null
+  var matches: ArrayBuffer[Double] = null
+  var inserts: ArrayBuffer[Double] = null
+  var deletes: ArrayBuffer[Double] = null
 
   // TODO(peter, 12/4) HMM parameters from the snp_prob and indel_prob?
-  val eta = -log10(1.0 + test_haplotype.length) // Note: want to use the _test_
-                                                // haplotype length here, not
-                                                // the ref length.
+  var eta = 0.0
   val delta = -4.0
   val epsilon = -4.0
 
@@ -55,18 +58,34 @@ class HMMAlignment (_ref: String, _test: String, _ref_start: Int) {
   val match_to_indel = q
   val indel_to_indel = q
 
-  var trace: ArrayBuffer[Char] = null
-  var matches: ArrayBuffer[Double] = null
-  var inserts: ArrayBuffer[Double] = null
-  var deletes: ArrayBuffer[Double] = null
+  def setup(_ref: String, _test: String, _ref_start: Int): Unit = {
+    ref_haplotype = _ref
+    test_haplotype = _test
+
+    ref_start = _ref_start
+
+    padded_ref_len = ref_haplotype.length + 1
+    padded_test_len = test_haplotype.length + 1
+
+    val old_mat_size = mat_size
+    stride = padded_ref_len
+    mat_size = padded_test_len * padded_ref_len
+
+    if (mat_size > old_mat_size) {
+      trace = new ArrayBuffer[Char](mat_size)
+      matches = new ArrayBuffer[Double](mat_size)
+      inserts = new ArrayBuffer[Double](mat_size)
+      deletes = new ArrayBuffer[Double](mat_size)
+    }
+
+    eta = -log10(1.0 + test_haplotype.length) // Note: want to use the _test_
+                                              // haplotype length here, not
+                                              // the ref length.
+  }
 
   def computeLogLikelihood(): Double = {
     // TODO(peter, 12/4) shortcut b/w global and local alignment: use a custom
     // start position in the reference haplotype.
-    trace = new ArrayBuffer[Char](mat_size)
-    matches = new ArrayBuffer[Double](mat_size)
-    inserts = new ArrayBuffer[Double](mat_size)
-    deletes = new ArrayBuffer[Double](mat_size)
     matches(ref_start) = 2.0 * eta
     inserts(ref_start) = Double.NegativeInfinity
     deletes(ref_start) = Double.NegativeInfinity
@@ -162,7 +181,7 @@ class KmerPath (_edges: ArrayBuffer[Kmer]) {
     mult_sum += e.mult
   }
 
-  def serialize(): String = {
+  def asHaplotypeString(): String = {
     var sb = new StringBuilder
     for (i <- Array.range(0, edges(0).prefix.string.length)) {
       sb += edges(0).prefix.string.charAt(i)
@@ -198,25 +217,25 @@ class KmerGraph (_klen: Int, _region_len: Int) {
   val spur_threshold = klen // TODO(peter, 11/26) how to choose thresh?
 
   //var reads: HashMap[String,AssemblyRead] = null
-  var reads: ArrayBuffer[AssemblyRead] = null
+  private var reads: ArrayBuffer[AssemblyRead] = null
 
   // Convenient to explicitly have the graph source and sink.
-  val source = new KmerVertex
-  val sink = new KmerVertex
+  private val source = new KmerVertex
+  private val sink = new KmerVertex
 
   // The actual kmer graph consists of unique K-1 prefixes and kmers connected
   // by vertices.
-  var prefixes = new HashMap[String,KmerPrefix]
-  var kmers = new HashMap[KmerPrefix,HashSet[Kmer]]
+  private var prefixes = new HashMap[String,KmerPrefix]
+  private var kmers = new HashMap[KmerPrefix,HashSet[Kmer]]
 
   // Paths through the kmer graph are in order of decreasing total mult.
-  var all_paths = new PriorityQueue[KmerPath]()(KmerPathOrdering)
+  private var all_paths = new PriorityQueue[KmerPath]()(KmerPathOrdering)
 
   def insertReadKmers(r: AssemblyRead): Unit = {
     // Construct L-K+1 kmers, initially connected to the source and sink.
     val read_seq = r.record.getSequence.toString
-    val readlen = read_seq.length
-    val offsets = ArrayBuffer.range(0, readlen - klen + 1)
+    val read_len = read_seq.length
+    val offsets = ArrayBuffer.range(0, read_len - klen + 1)
     val ks = offsets.map(idx => {
       val prefix_str = read_seq.substring(idx, idx + klen - 1)
       val prefix = prefixes.getOrElseUpdate(prefix_str, new KmerPrefix(prefix_str))
@@ -374,6 +393,22 @@ class KmerGraph (_klen: Int, _region_len: Int) {
     }
     allPathsDFS(source, 0)
   }
+
+  def getAllPaths(): PriorityQueue[KmerPath] = all_paths
+}
+
+class Haplotype (_string: String) {
+  val string = _string
+
+  def scoreReadsLikelihood(reads: Seq[ADAMRecord]): Double = {
+    // TODO(peter, 12/6)
+    Double.NegativeInfinity
+  }
+
+  def scorePairwiseLikelihood(other: Haplotype): Double = {
+    // TODO(peter, 12/6)
+    Double.NegativeInfinity
+  }
 }
 
 /**
@@ -383,7 +418,7 @@ class ReadCallAssemblyPhaser extends ReadCall {
   override val callName = "AssemblyPhaser"
 
   val kmer_len = 20
-  val region_len = 200
+  val region_window = 200
 
   val cigar_codec = new TextCigarCodec
 
@@ -467,8 +502,9 @@ class ReadCallAssemblyPhaser extends ReadCall {
   def regionIsActive(region: Seq[ADAMRecord], ref: String): Boolean = {
     // TODO(peter, 12/6) a very naive active region criterion. Upgrade asap!
     val active_likelihood_thresh = -2.0
+    var hmm = new HMMAligner
     for (r <- region) {
-      var hmm = new HMMAlignment(ref, r.getSequence.toString, 0)
+      hmm.setup(ref, r.getSequence.toString, 0)
       val read_likelihood = hmm.computeLogLikelihood
       if (read_likelihood < active_likelihood_thresh) {
         return true
@@ -478,6 +514,8 @@ class ReadCallAssemblyPhaser extends ReadCall {
   }
 
   def assemble(region: Seq[ADAMRecord]): KmerGraph = {
+    val read_len = region(0).getSequence.length
+    val region_len = region_window + read_len - 1
     var kmer_graph = new KmerGraph(kmer_len, region_len)
     kmer_graph.insertReads(region)
     kmer_graph.connectGraph
@@ -488,8 +526,14 @@ class ReadCallAssemblyPhaser extends ReadCall {
 
   def phaseAssembly(region: Seq[ADAMRecord], kmer_graph: KmerGraph, ref: String): Seq[(ADAMVariant, List[ADAMGenotype])] = {
     var variants = new ArrayBuffer[(ADAMVariant, List[ADAMGenotype])]
-    // TODO(peter, 12/5) make haplotypes from all_paths, score them w.r.t.
-    // the reads, and pick out the variants from the top scoring haplotypes.
+    // TODO(peter, 12/6) first pass of haplotype calling thing:
+    // 1. score all haplotypes, pick the top ~10
+    // 2. compute all pairwise scores of the remaining + reference to phase
+    //    (check out the Dindel paper for details)
+    var hmm = new HMMAligner
+    for (path <- kmer_graph.getAllPaths) {
+      val haplotype = new Haplotype(path.asHaplotypeString)
+    }
     variants
   }
 
@@ -501,7 +545,7 @@ class ReadCallAssemblyPhaser extends ReadCall {
    */
   override def call(reads: RDD[ADAMRecord]): RDD[(ADAMVariant, List[ADAMGenotype])] = {
     log.info("Grouping reads into active regions.")
-    val active_regions = reads.groupBy(r => r.getStart / region_len)
+    val active_regions = reads.groupBy(r => r.getStart / region_window)
                               .map(x => (getReference(x._2), x._2))
                               .filter(x => regionIsActive(x._2, x._1))
     log.info("Found " + active_regions.count.toString + " active regions.")
