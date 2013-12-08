@@ -41,14 +41,6 @@ class HMMAligner {
   var stride = 0
   var mat_size = 0
 
-  private var matches: ArrayBuffer[Double] = null
-  private var inserts: ArrayBuffer[Double] = null
-  private var deletes: ArrayBuffer[Double] = null
-
-  private var trace_matches: ArrayBuffer[Char] = null
-  private var trace_inserts: ArrayBuffer[Char] = null
-  private var trace_deletes: ArrayBuffer[Char] = null
-
   var eta = Double.NegativeInfinity
 
   // TODO(peter, 12/7) I'm forgetting a factor of 3 somewhere...
@@ -58,8 +50,19 @@ class HMMAligner {
   val indel_to_match_prior = -4.0
   val indel_to_indel_prior = -4.0
 
-  //def loadSequences(_ref: String, _test: String, _ref_offset: Int): Unit = {
-  def loadSequences(_ref: String, _test: String, _test_quals: String): Unit = {
+  private var matches: ArrayBuffer[Double] = null
+  private var inserts: ArrayBuffer[Double] = null
+  private var deletes: ArrayBuffer[Double] = null
+
+  private var trace_matches: ArrayBuffer[Char] = null
+  private var trace_inserts: ArrayBuffer[Char] = null
+  private var trace_deletes: ArrayBuffer[Char] = null
+
+  private var alignment_likelihood = Double.NegativeInfinity
+  private var alignment_prior = Double.NegativeInfinity
+
+  //def alignSequences(_ref: String, _test: String, _ref_offset: Int): Unit = {
+  def alignSequences(_ref: String, _test: String, _test_quals: String): Unit = {
     ref_sequence = _ref
     test_sequence = _test
     test_qualities = _test_quals
@@ -71,7 +74,7 @@ class HMMAligner {
 
     val old_mat_size = mat_size
     stride = padded_ref_len
-    mat_size = padded_test_len * padded_ref_len
+    mat_size = max(mat_size, padded_test_len * padded_ref_len)
 
     if (mat_size > old_mat_size) {
       matches = new ArrayBuffer[Double](mat_size)
@@ -79,13 +82,9 @@ class HMMAligner {
       deletes = new ArrayBuffer[Double](mat_size)
     }
 
-    eta = -log10(1.0 + test_sequence.length) // Note: want to use the _test_
-                                             // haplotype length here, not
-                                             // the ref length.
-  }
+    // Note: want to use the _test_ haplotype length here, not the ref length.
+    eta = -log10(1.0 + test_sequence.length)
 
-  // Compute the (log10) likelihood of aligning the test sequence to the ref.
-  def computeLikelihood(): Double = {
     // TODO(peter, 12/4) shortcut b/w global and local alignment: use a custom
     // start position in the reference haplotype.
     matches(0) = 2.0 * eta
@@ -138,14 +137,18 @@ class HMMAligner {
         }
       }
     }
-    val v = max(matches(mat_size - 1), max(inserts(mat_size - 1), deletes(mat_size - 1)))
-    v
+    alignment_likelihood = max(matches(mat_size - 1), max(inserts(mat_size - 1), deletes(mat_size - 1)))
+  }
+
+  // Compute the (log10) likelihood of aligning the test sequence to the ref.
+  def getLikelihood(): Double = {
+    alignment_likelihood
   }
 
   // Compute the (log10) prior prob of observing the given alignment.
   // This uses the quick and dirty numbers from the Dindel (2011) paper.
-  def computePrior(): Double = {
-    Double.NegativeInfinity
+  def getPrior(): Double = {
+    alignment_prior
   }
 
   // Return the cigar string (or equivalent) for the given alignment.
@@ -407,10 +410,12 @@ class Haplotype (_sequence: String) {
   val sequence = _sequence
   var reads_likelihood = Double.NegativeInfinity
 
-  def scoreReadsLikelihood(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
+  def scoreReadsProbability(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
+    reads_likelihood = 0.0
     for (r <- reads) {
-      hmm.loadSequences(sequence, r.getSequence.toString, null)
-      reads_likelihood = hmm.computeLikelihood
+      hmm.alignSequences(sequence, r.getSequence.toString, null)
+      val read_like = hmm.getLikelihood // - hmm.getPrior
+      reads_likelihood += read_like
     }
     reads_likelihood
   }
@@ -431,20 +436,46 @@ object HaplotypeOrdering extends Ordering[Haplotype] {
 }
 
 class HaplotypePair (_h1: Haplotype, _h2: Haplotype) {
-  var haplotype1 = _h1
-  var haplotype2 = _h2
-  var pairwise_likelihood = Double.NegativeInfinity
+  val haplotype1 = _h1
+  val haplotype2 = _h2
+  var pair_likelihood = Double.NegativeInfinity
 
-  def scorePairwiseLikelihood(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
+  def exactLogSumExp10(x1: Double, x2: Double): Double = {
+    log10(pow(10.0, x1) + pow(10.0, x2))
+  }
+
+  def approxLogSumExp10(x1: Double, x2: Double): Double = {
+    // TODO(peter, 12/7)
+    log10(pow(10.0, x1) + pow(10.0, x2))
+  }
+
+  def scorePairProbability(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
     // TODO(peter, 12/6) two parts to the likelihood:
     // 1. joint prob w.r.t. read group
     // 2. prior prob w.r.t. alignment b/w haplotypes
-    pairwise_likelihood
+    var reads_prob = 0.0
+    for (r <- reads) {
+      hmm.alignSequences(haplotype1.sequence, r.getSequence.toString, null)
+      val read_like1 = hmm.getLikelihood // - hmm.getPrior
+      hmm.alignSequences(haplotype2.sequence, r.getSequence.toString, null)
+      val read_like2 = hmm.getLikelihood // - hmm.getPrior
+      reads_prob += exactLogSumExp10(read_like1, read_like2) - log10(2.0)
+    }
+    hmm.alignSequences(haplotype2.sequence, haplotype1.sequence, null)
+    val prior_prob = hmm.getPrior
+    pair_likelihood = reads_prob + prior_prob
+    pair_likelihood
   }
 }
 
 object HaplotypePairOrdering extends Ordering[HaplotypePair] {
   def compare(pair1: HaplotypePair, pair2: HaplotypePair): Int = {
+    if (pair1.pair_likelihood > pair2.pair_likelihood) {
+      return -1
+    }
+    else if (pair1.pair_likelihood < pair2.pair_likelihood) {
+      return 1
+    }
     0
   }
 }
@@ -542,13 +573,8 @@ class ReadCallAssemblyPhaser extends ReadCall {
     val active_likelihood_thresh = -2.0
     var ref_haplotype = new Haplotype(ref)
     var hmm = new HMMAligner
-    for (r <- region) {
-      val reads_likelihood = ref_haplotype.scoreReadsLikelihood(hmm, region)
-      if (reads_likelihood < active_likelihood_thresh) {
-        return true
-      }
-    }
-    false
+    val reads_likelihood = ref_haplotype.scoreReadsProbability(hmm, region)
+    reads_likelihood < active_likelihood_thresh
   }
 
   def assemble(region: Seq[ADAMRecord]): KmerGraph = {
@@ -573,11 +599,11 @@ class ReadCallAssemblyPhaser extends ReadCall {
 
     // Score the all haplotypes.
     var hmm = new HMMAligner
-    ref_haplotype.scoreReadsLikelihood(hmm, region)
+    ref_haplotype.scoreReadsProbability(hmm, region)
     var ordered_haplotypes = new PriorityQueue[Haplotype]()(HaplotypeOrdering)
     for (path <- kmer_graph.getAllPaths) {
       val haplotype = new Haplotype(path.asHaplotypeString)
-      haplotype.scoreReadsLikelihood(hmm, region)
+      haplotype.scoreReadsProbability(hmm, region)
       ordered_haplotypes.enqueue(haplotype)
     }
 
@@ -597,7 +623,7 @@ class ReadCallAssemblyPhaser extends ReadCall {
     for (i <- 0 to best_haplotypes.length) {
       for (j <- 0 to (i + 1)) {
         var pair = new HaplotypePair(best_haplotypes(i), best_haplotypes(j))
-        pair.scorePairwiseLikelihood(hmm, region)
+        pair.scorePairProbability(hmm, region)
         ordered_haplotype_pairs.enqueue(pair)
       }
     }
