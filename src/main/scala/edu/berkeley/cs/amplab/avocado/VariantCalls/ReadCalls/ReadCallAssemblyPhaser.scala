@@ -25,9 +25,12 @@ import scala.collection.JavaConversions._
 import scala.collection.mutable.{ArrayBuffer, Buffer, HashMap, HashSet, PriorityQueue, StringBuilder}
 import scala.math._
 
+/**
+ * Pairwise alignment HMM. See the Durbin textbook (1998), chapter 4.
+ */
 class HMMAligner {
-  var ref_haplotype: String = null
-  var test_haplotype: String = null
+  var ref_sequence: String = null
+  var test_sequence: String = null
 
   var ref_start = 0
 
@@ -37,50 +40,40 @@ class HMMAligner {
   var stride = 0
   var mat_size = 0
 
-  var trace: ArrayBuffer[Char] = null
   var matches: ArrayBuffer[Double] = null
   var inserts: ArrayBuffer[Double] = null
   var deletes: ArrayBuffer[Double] = null
 
-  // TODO(peter, 12/4) HMM parameters from the snp_prob and indel_prob?
-  var eta = 0.0
+  var trace_matches: ArrayBuffer[Char] = null
+  var trace_inserts: ArrayBuffer[Char] = null
+  var trace_deletes: ArrayBuffer[Char] = null
+
+  var eta = Double.NegativeInfinity
   val delta = -4.0
   val epsilon = -4.0
 
-  // TODO(peter, 12/3) using a default quality for now, should use read scores.
-  val q_phred = 40
-  val q = pow(10.0, q_phred / -10.0)
-  val p = 1.0 - q
-  val prior_match = p
-  val prior_indel = q
-  val match_to_match = p
-  val indel_to_match = p
-  val match_to_indel = q
-  val indel_to_indel = q
-
-  def setupHaplotypes(_ref: String, _test: String, _ref_start: Int): Unit = {
-    ref_haplotype = _ref
-    test_haplotype = _test
+  def loadSequences(_ref: String, _test: String, _ref_start: Int): Unit = {
+    ref_sequence = _ref
+    test_sequence = _test
 
     ref_start = _ref_start
 
-    padded_ref_len = ref_haplotype.length + 1
-    padded_test_len = test_haplotype.length + 1
+    padded_ref_len = ref_sequence.length + 1
+    padded_test_len = test_sequence.length + 1
 
     val old_mat_size = mat_size
     stride = padded_ref_len
     mat_size = padded_test_len * padded_ref_len
 
     if (mat_size > old_mat_size) {
-      trace = new ArrayBuffer[Char](mat_size)
       matches = new ArrayBuffer[Double](mat_size)
       inserts = new ArrayBuffer[Double](mat_size)
       deletes = new ArrayBuffer[Double](mat_size)
     }
 
-    eta = -log10(1.0 + test_haplotype.length) // Note: want to use the _test_
-                                              // haplotype length here, not
-                                              // the ref length.
+    eta = -log10(1.0 + test_sequence.length) // Note: want to use the _test_
+                                             // haplotype length here, not
+                                             // the ref length.
   }
 
   // Compute the (log10) likelihood of aligning the test sequence to the ref.
@@ -95,11 +88,14 @@ class HMMAligner {
         if (i > 0 || j > 0) {
           val idx = i * stride + j
 
-          val m_prior = 0.0 // TODO(peter, 12/4) different match prior if snp or not.
+          // TODO(peter, 12/7) should actually set this to something, if we
+          // want to, you know, compute the likelihood...
+          val prior = 0.0
+
           val m_match = matches((i-1) * stride + (j-1))
           val m_insert = inserts((i-1) * stride + (j-1))
           val m_delete = deletes((i-1) * stride + (j-1))
-          val m = m_prior + max(m_match, max(m_insert, m_delete))
+          val m = prior + max(m_match, max(m_insert, m_delete))
 
           val ins_match = matches((i-1) * stride + j) + delta
           val ins_insert = inserts((i-1) * stride + j) + epsilon
@@ -109,18 +105,8 @@ class HMMAligner {
           val del_delete = deletes(i * stride + (j-1)) + epsilon
           val del = max(del_match, del_delete)
 
-          val best = max(m, max(ins, del))
-          val t = if (best == m) {
-            'M'
-          } else if (best == ins) {
-            'I'
-          } else if (best == del) {
-            'D'
-          } else {
-            '.'
-          }
+          // TODO(peter, 12/7) backtracking pointers
 
-          trace(idx) = t
           matches(idx) = m
           inserts(idx) = ins
           deletes(idx) = del
@@ -136,13 +122,6 @@ class HMMAligner {
     for (i <- 0 to padded_test_len) {
       for (j <- ref_start to padded_ref_len) {
         val idx = i * stride + j
-        val t = trace(idx)
-        t match {
-          case 'M' => {}
-          case 'I' => {}
-          case 'D' => {}
-          case _ => {}
-        }
       }
     }
   }
@@ -398,14 +377,14 @@ class KmerGraph (_klen: Int, _region_len: Int) {
   def getAllPaths(): PriorityQueue[KmerPath] = all_paths
 }
 
-class Haplotype (_string: String) {
-  val string = _string
+class Haplotype (_sequence: String) {
+  val sequence = _sequence
   var reads_likelihood = Double.NegativeInfinity
 
   def scoreReadsLikelihood(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
     for (r <- reads) {
       // TODO(peter, 12/6) ref offset?
-      hmm.setupHaplotypes(string, r.getSequence.toString, 0)
+      hmm.loadSequences(sequence, r.getSequence.toString, 0)
       reads_likelihood = hmm.computeLikelihood
     }
     reads_likelihood
@@ -456,8 +435,8 @@ class ReadCallAssemblyPhaser extends ReadCall {
 
   val cigar_codec = new TextCigarCodec
 
+  // See: (https://github.com/bigdatagenomics/adam/blob/indel-realign/adam-commands/src/main/scala/edu/berkeley/cs/amplab/adam/util/MdTag.scala).
   def getReadReference(read: ADAMRecord): String = {
-    // See: (https://github.com/bigdatagenomics/adam/blob/indel-realign/adam-commands/src/main/scala/edu/berkeley/cs/amplab/adam/util/MdTag.scala).
     val mdtag = MdTag(read.getMismatchingPositions.toString, read.getStart)
 
     val read_seq = read.getSequence.toString
@@ -538,7 +517,7 @@ class ReadCallAssemblyPhaser extends ReadCall {
     val active_likelihood_thresh = -2.0
     var hmm = new HMMAligner
     for (r <- region) {
-      hmm.setupHaplotypes(ref, r.getSequence.toString, 0)
+      hmm.loadSequences(ref, r.getSequence.toString, 0)
       val read_likelihood = hmm.computeLikelihood
       if (read_likelihood < active_likelihood_thresh) {
         return true
