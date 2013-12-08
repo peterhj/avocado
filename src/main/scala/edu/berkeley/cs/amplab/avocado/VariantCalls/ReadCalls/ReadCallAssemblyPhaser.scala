@@ -31,8 +31,9 @@ import scala.math._
 class HMMAligner {
   var ref_sequence: String = null
   var test_sequence: String = null
+  var test_qualities: String = null
 
-  var ref_start = 0
+  var ref_offset = 0
 
   var padded_ref_len = 0
   var padded_test_len = 0
@@ -40,23 +41,30 @@ class HMMAligner {
   var stride = 0
   var mat_size = 0
 
-  var matches: ArrayBuffer[Double] = null
-  var inserts: ArrayBuffer[Double] = null
-  var deletes: ArrayBuffer[Double] = null
+  private var matches: ArrayBuffer[Double] = null
+  private var inserts: ArrayBuffer[Double] = null
+  private var deletes: ArrayBuffer[Double] = null
 
-  var trace_matches: ArrayBuffer[Char] = null
-  var trace_inserts: ArrayBuffer[Char] = null
-  var trace_deletes: ArrayBuffer[Char] = null
+  private var trace_matches: ArrayBuffer[Char] = null
+  private var trace_inserts: ArrayBuffer[Char] = null
+  private var trace_deletes: ArrayBuffer[Char] = null
 
   var eta = Double.NegativeInfinity
-  val delta = -4.0
-  val epsilon = -4.0
 
-  def loadSequences(_ref: String, _test: String, _ref_start: Int): Unit = {
+  // TODO(peter, 12/7) I'm forgetting a factor of 3 somewhere...
+  val mismatch_prior = -3.0 - log10(3.0)
+  val match_prior = log10(1.0 - 1.0e-3)
+  val indel_prior = -4.0
+  val indel_to_match_prior = -4.0
+  val indel_to_indel_prior = -4.0
+
+  //def loadSequences(_ref: String, _test: String, _ref_offset: Int): Unit = {
+  def loadSequences(_ref: String, _test: String, _test_quals: String): Unit = {
     ref_sequence = _ref
     test_sequence = _test
+    test_qualities = _test_quals
 
-    ref_start = _ref_start
+    //ref_offset = _ref_offset
 
     padded_ref_len = ref_sequence.length + 1
     padded_test_len = test_sequence.length + 1
@@ -80,30 +88,47 @@ class HMMAligner {
   def computeLikelihood(): Double = {
     // TODO(peter, 12/4) shortcut b/w global and local alignment: use a custom
     // start position in the reference haplotype.
-    matches(ref_start) = 2.0 * eta
-    inserts(ref_start) = Double.NegativeInfinity
-    deletes(ref_start) = Double.NegativeInfinity
+    matches(0) = 2.0 * eta
+    inserts(0) = Double.NegativeInfinity
+    deletes(0) = Double.NegativeInfinity
     for (i <- 0 to padded_test_len) {
-      for (j <- ref_start to padded_ref_len) {
+      //for (j <- 0 to (padded_ref_len - ref_offset)) {
+      for (j <- 0 to padded_ref_len) {
         if (i > 0 || j > 0) {
           val idx = i * stride + j
 
-          // TODO(peter, 12/7) should actually set this to something, if we
-          // want to, you know, compute the likelihood...
-          val prior = 0.0
+          val m = if (i >= 1 && j >= 1) {
+            val test_base = test_sequence(i-1)
+            val ref_base = ref_sequence(j-1)
+            // TODO(peter, 12/7) there is a second constant term to the prior...
+            val prior = if (test_base == ref_base) {
+              match_prior / (indel_prior * indel_prior)
+            } else {
+              mismatch_prior / (indel_prior * indel_prior)
+            }
+            val m_match = matches((i-1) * stride + (j-1))
+            val m_insert = inserts((i-1) * stride + (j-1))
+            val m_delete = deletes((i-1) * stride + (j-1))
+            max(m_match, max(m_insert, m_delete)) + prior
+          } else {
+            Double.NegativeInfinity
+          }
 
-          val m_match = matches((i-1) * stride + (j-1))
-          val m_insert = inserts((i-1) * stride + (j-1))
-          val m_delete = deletes((i-1) * stride + (j-1))
-          val m = prior + max(m_match, max(m_insert, m_delete))
+          val ins = if (i >= 1) {
+            val ins_match = matches((i-1) * stride + j) + indel_to_match_prior
+            val ins_insert = inserts((i-1) * stride + j) + indel_to_indel_prior
+            max(ins_match, ins_insert)
+          } else {
+            Double.NegativeInfinity
+          }
 
-          val ins_match = matches((i-1) * stride + j) + delta
-          val ins_insert = inserts((i-1) * stride + j) + epsilon
-          val ins = max(ins_match, ins_insert)
-
-          val del_match = matches(i * stride + (j-1)) + delta
-          val del_delete = deletes(i * stride + (j-1)) + epsilon
-          val del = max(del_match, del_delete)
+          val del = if (j >= 1) {
+            val del_match = matches(i * stride + (j-1)) + indel_to_match_prior
+            val del_delete = deletes(i * stride + (j-1)) + indel_to_indel_prior
+            max(del_match, del_delete)
+          } else {
+            Double.NegativeInfinity
+          }
 
           // TODO(peter, 12/7) backtracking pointers
 
@@ -117,13 +142,14 @@ class HMMAligner {
     v
   }
 
-  def computeAlignment(): Unit = {
-    // TODO(peter, 12/4) just make a cigar string?
-    for (i <- 0 to padded_test_len) {
-      for (j <- ref_start to padded_ref_len) {
-        val idx = i * stride + j
-      }
-    }
+  // Compute the (log10) prior prob of observing the given alignment.
+  // This uses the quick and dirty numbers from the Dindel (2011) paper.
+  def computePrior(): Double = {
+    Double.NegativeInfinity
+  }
+
+  // Return the cigar string (or equivalent) for the given alignment.
+  def getAlignment(): Unit = {
   }
 }
 
@@ -383,8 +409,7 @@ class Haplotype (_sequence: String) {
 
   def scoreReadsLikelihood(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
     for (r <- reads) {
-      // TODO(peter, 12/6) ref offset?
-      hmm.loadSequences(sequence, r.getSequence.toString, 0)
+      hmm.loadSequences(sequence, r.getSequence.toString, null)
       reads_likelihood = hmm.computeLikelihood
     }
     reads_likelihood
@@ -515,11 +540,11 @@ class ReadCallAssemblyPhaser extends ReadCall {
   def regionIsActive(region: Seq[ADAMRecord], ref: String): Boolean = {
     // TODO(peter, 12/6) a very naive active region criterion. Upgrade asap!
     val active_likelihood_thresh = -2.0
+    var ref_haplotype = new Haplotype(ref)
     var hmm = new HMMAligner
     for (r <- region) {
-      hmm.loadSequences(ref, r.getSequence.toString, 0)
-      val read_likelihood = hmm.computeLikelihood
-      if (read_likelihood < active_likelihood_thresh) {
+      val reads_likelihood = ref_haplotype.scoreReadsLikelihood(hmm, region)
+      if (reads_likelihood < active_likelihood_thresh) {
         return true
       }
     }
@@ -557,6 +582,8 @@ class ReadCallAssemblyPhaser extends ReadCall {
     }
 
     // Pick the top X-1 haplotypes and the reference haplotype.
+    // TODO(peter, 12/7) This is _purely_ a premature optimization to save what
+    // might not even take that much time.
     val max_num_best_haplotypes = 16
     val num_best_haplotypes = min(max_num_best_haplotypes, ordered_haplotypes.length)
     var best_haplotypes = new ArrayBuffer[Haplotype]
