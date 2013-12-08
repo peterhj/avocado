@@ -72,8 +72,8 @@ class KmerPath (_edges: ArrayBuffer[Kmer]) {
 }
 
 object KmerPathOrdering extends Ordering[KmerPath] {
+  // Kmer paths are ordered by increasing mult sum.
   def compare(path1: KmerPath, path2: KmerPath): Int = {
-    // Kmer paths are ordered by increasing mult sum.
     if (path1.mult_sum > path2.mult_sum) {
       return -1
     }
@@ -322,11 +322,9 @@ class HMMAligner {
 
     padded_ref_len = ref_sequence.length + 1
     padded_test_len = test_sequence.length + 1
-
-    val old_mat_size = mat_size
     stride = padded_ref_len
+    val old_mat_size = mat_size
     mat_size = max(mat_size, padded_test_len * padded_ref_len)
-
     if (mat_size > old_mat_size) {
       matches = new ArrayBuffer[Double](mat_size)
       inserts = new ArrayBuffer[Double](mat_size)
@@ -348,7 +346,6 @@ class HMMAligner {
       //for (j <- 0 to (padded_ref_len - ref_offset)) {
       for (j <- 0 to padded_ref_len) {
         if (i > 0 || j > 0) {
-          // TODO(peter, 12/7) backtracking pointers
           val (m, tr_m) = if (i >= 1 && j >= 1) {
             val test_base = test_sequence(i-1)
             val ref_base = ref_sequence(j-1)
@@ -421,6 +418,10 @@ class HMMAligner {
       }
     }
     alignment_likelihood = max(matches(mat_size - 1), max(inserts(mat_size - 1), deletes(mat_size - 1)))
+
+    // TODO(peter, 12/7) backtrack to get the alignment.
+
+    alignment_likelihood
   }
 
   // Compute the (log10) likelihood of aligning the test sequence to the ref.
@@ -450,13 +451,13 @@ class Haplotype (_sequence: String) {
 }
 
 object HaplotypeOrdering extends Ordering[Haplotype] {
+  // Haplotypes are ordered by increasing reads likelihood, assuming they
+  // come from the same read group.
   def compare(h1: Haplotype, h2: Haplotype): Int = {
-    // Haplotypes are ordered by decreasing reads likelihood, assuming they
-    // come from the same read group.
-    if (h1.reads_likelihood > h2.reads_likelihood) {
+    if (h1.reads_likelihood < h2.reads_likelihood) {
       return -1
     }
-    else if (h1.reads_likelihood < h2.reads_likelihood) {
+    else if (h1.reads_likelihood > h2.reads_likelihood) {
       return 1
     }
     0
@@ -497,11 +498,13 @@ class HaplotypePair (_h1: Haplotype, _h2: Haplotype) {
 }
 
 object HaplotypePairOrdering extends Ordering[HaplotypePair] {
+  // Haplotype pairs are ordered by increasing pairwise likelihood, assuming
+  // they come from the same read group.
   def compare(pair1: HaplotypePair, pair2: HaplotypePair): Int = {
-    if (pair1.pair_likelihood > pair2.pair_likelihood) {
+    if (pair1.pair_likelihood < pair2.pair_likelihood) {
       return -1
     }
-    else if (pair1.pair_likelihood < pair2.pair_likelihood) {
+    else if (pair1.pair_likelihood > pair2.pair_likelihood) {
       return 1
     }
     0
