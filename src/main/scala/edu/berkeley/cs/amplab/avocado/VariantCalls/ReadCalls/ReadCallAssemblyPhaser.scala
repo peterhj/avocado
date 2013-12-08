@@ -18,6 +18,7 @@ package edu.berkeley.cs.amplab.avocado.calls.reads
 
 import edu.berkeley.cs.amplab.adam.avro.{ADAMRecord, ADAMVariant, ADAMGenotype}
 import edu.berkeley.cs.amplab.adam.util.{MdTag}
+import edu.berkeley.cs.amplab.avocado.utils.{Phred}
 import net.sf.samtools.{Cigar, CigarOperator, CigarElement, TextCigarCodec}
 import org.apache.spark.{SparkContext, Logging}
 import org.apache.spark.rdd.{RDD}
@@ -280,7 +281,11 @@ class KmerGraph (_klen: Int, _region_len: Int) {
  */
 class HMMAligner {
   var ref_sequence: String = null
+  var ref_aligned: String = null
+
   var test_sequence: String = null
+  var test_aligned: String = null
+
   var test_qualities: String = null
 
   var ref_offset = 0
@@ -313,7 +318,7 @@ class HMMAligner {
   private var alignment_prior = Double.NegativeInfinity
 
   //def alignSequences(_ref: String, _test: String, _ref_offset: Int): Unit = {
-  def alignSequences(_ref: String, _test: String, _test_quals: String): Unit = {
+  def alignSequences(_ref: String, _test: String, _test_quals: String): Boolean = {
     ref_sequence = _ref
     test_sequence = _test
     test_qualities = _test_quals
@@ -337,6 +342,7 @@ class HMMAligner {
     // Note: want to use the _test_ haplotype length here, not the ref length.
     eta = -log10(1.0 + test_sequence.length)
 
+    // Compute the optimal alignment.
     // TODO(peter, 12/4) shortcut b/w global and local alignment: use a custom
     // start position in the reference haplotype.
     matches(0) = 2.0 * eta
@@ -380,8 +386,7 @@ class HMMAligner {
             val ins = max(ins_match, ins_insert)
             val t = if (ins == ins_match) {
               'M'
-            }
-            else if (ins == ins_insert) {
+            } else if (ins == ins_insert) {
               'I'
             } else {
               '.'
@@ -397,8 +402,7 @@ class HMMAligner {
             val del = max(del_match, del_delete)
             val t = if (del == del_match) {
               'M'
-            }
-            else if (del == del_delete) {
+            } else if (del == del_delete) {
               'D'
             } else {
               '.'
@@ -419,9 +423,61 @@ class HMMAligner {
     }
     alignment_likelihood = max(matches(mat_size - 1), max(inserts(mat_size - 1), deletes(mat_size - 1)))
 
-    // TODO(peter, 12/7) backtrack to get the alignment.
+    // Traceback to get the aligned sequences.
+    var has_variants = false
+    var num_snps = 0
+    var num_indels = 0
+    var rev_aligned_test_seq = ""
+    var rev_aligned_ref_seq = ""
+    var i = padded_test_len - 1
+    var j = padded_ref_len - 1
+    while (i > 0 || j > 0) {
+      val idx = i * stride + j
+      val best_score = max(matches(idx), max(inserts(idx), deletes(idx)))
+      // TODO(peter, 12/7) here, build the aligned sequences.
+      val tr = if (best_score == matches(idx)) {
+        rev_aligned_test_seq += test_sequence(i-1)
+        rev_aligned_ref_seq += ref_sequence(j-1)
+        if (test_sequence(i-1) != ref_sequence(j-1)) {
+          has_variants = true
+          num_snps += 1
+        }
+        trace_matches(idx)
+      } else if (best_score == inserts(idx)) {
+        rev_aligned_test_seq += test_sequence(i-1)
+        has_variants = true
+        num_indels += 1
+        trace_inserts(idx)
+      } else if (best_score == deletes(idx)) {
+        rev_aligned_ref_seq += ref_sequence(j-1)
+        has_variants = true
+        num_indels += 1
+        trace_deletes(idx)
+      } else {
+        '.'
+      }
+      tr match {
+        case 'M' => {
+          i -= 1
+          j -= 1
+        }
+        case 'I' => {
+          i -= 1
+        }
+        case 'D' => {
+          j -= 1
+        }
+        case _ => {} // TODO(peter, 12/8) the alignment is bad (probably a bug).
+      }
+    }
+    test_aligned = rev_aligned_test_seq.reverse
+    ref_aligned = rev_aligned_ref_seq.reverse
 
-    alignment_likelihood
+    // Compute the prior probability of the alignments, with the Dindel numbers.
+    alignment_prior = mismatch_prior * num_snps + indel_prior * num_indels
+
+    // Returns whether the alignment has any SNPs or indels.
+    has_variants
   }
 
   // Compute the (log10) likelihood of aligning the test sequence to the ref.
@@ -430,20 +486,22 @@ class HMMAligner {
   // Compute the (log10) prior prob of observing the given alignment.
   def getPrior(): Double = alignment_prior
 
-  // Return the cigar string (or equivalent) for the given alignment.
-  def getAlignment(): Unit = {
-  }
+  // Return the alignment.
+  def getAlignedSequences(): (String, String) = (ref_aligned, test_aligned)
 }
 
 class Haplotype (_sequence: String) {
   val sequence = _sequence
+  var per_read_likelihoods = new ArrayBuffer[Double]
   var reads_likelihood = Double.NegativeInfinity
 
-  def scoreReadsProbability(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
+  def scoreReadsLikelihood(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
+    per_read_likelihoods.clear
     reads_likelihood = 0.0
     for (r <- reads) {
       hmm.alignSequences(sequence, r.getSequence.toString, null)
       val read_like = hmm.getLikelihood // - hmm.getPrior
+      per_read_likelihoods += read_like
       reads_likelihood += read_like
     }
     reads_likelihood
@@ -468,6 +526,8 @@ class HaplotypePair (_h1: Haplotype, _h2: Haplotype) {
   val haplotype1 = _h1
   val haplotype2 = _h2
   var pair_likelihood = Double.NegativeInfinity
+  var haplotype1_alignment = new ArrayBuffer[(Int, Char)]
+  var haplotype2_alignment = new ArrayBuffer[(Int, Char)]
 
   def exactLogSumExp10(x1: Double, x2: Double): Double = {
     log10(pow(10.0, x1) + pow(10.0, x2))
@@ -478,22 +538,26 @@ class HaplotypePair (_h1: Haplotype, _h2: Haplotype) {
     log10(pow(10.0, x1) + pow(10.0, x2))
   }
 
-  def scorePairProbability(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
-    // TODO(peter, 12/6) two parts to the likelihood:
-    // 1. joint prob w.r.t. read group
-    // 2. prior prob w.r.t. alignment b/w haplotypes
+  def scorePairLikelihood(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
     var reads_prob = 0.0
-    for (r <- reads) {
-      hmm.alignSequences(haplotype1.sequence, r.getSequence.toString, null)
-      val read_like1 = hmm.getLikelihood // - hmm.getPrior
-      hmm.alignSequences(haplotype2.sequence, r.getSequence.toString, null)
-      val read_like2 = hmm.getLikelihood // - hmm.getPrior
-      reads_prob += exactLogSumExp10(read_like1, read_like2) - log10(2.0)
+    for (i <- 0 to reads.length) {
+      val read_likelihood1 = haplotype1.per_read_likelihoods(i)
+      val read_likelihood2 = haplotype2.per_read_likelihoods(i)
+      reads_prob += exactLogSumExp10(read_likelihood1, read_likelihood2) - log10(2.0)
     }
     hmm.alignSequences(haplotype2.sequence, haplotype1.sequence, null)
     val prior_prob = hmm.getPrior
     pair_likelihood = reads_prob + prior_prob
     pair_likelihood
+  }
+
+  def alignToReference(hmm: HMMAligner, ref_haplotype: Haplotype): Boolean = {
+    // TODO(peter, 12/8) store the alignment details (including the cigar).
+    var has_variants = hmm.alignSequences(ref_haplotype.sequence, haplotype1.sequence, null)
+    if (haplotype2 != haplotype1) {
+      has_variants |= hmm.alignSequences(ref_haplotype.sequence, haplotype2.sequence, null)
+    }
+    has_variants
   }
 }
 
@@ -604,7 +668,7 @@ class ReadCallAssemblyPhaser extends ReadCall {
     val active_likelihood_thresh = -2.0
     var ref_haplotype = new Haplotype(ref)
     var hmm = new HMMAligner
-    val reads_likelihood = ref_haplotype.scoreReadsProbability(hmm, region)
+    val reads_likelihood = ref_haplotype.scoreReadsLikelihood(hmm, region)
     reads_likelihood < active_likelihood_thresh
   }
 
@@ -628,19 +692,17 @@ class ReadCallAssemblyPhaser extends ReadCall {
   def phaseAssembly(region: Seq[ADAMRecord], kmer_graph: KmerGraph, ref: String): Seq[(ADAMVariant, List[ADAMGenotype])] = {
     var ref_haplotype = new Haplotype(ref)
 
-    // Score the all haplotypes.
+    // Score all haplotypes against the reads.
     var hmm = new HMMAligner
-    ref_haplotype.scoreReadsProbability(hmm, region)
+    ref_haplotype.scoreReadsLikelihood(hmm, region)
     var ordered_haplotypes = new PriorityQueue[Haplotype]()(HaplotypeOrdering)
     for (path <- kmer_graph.getAllPaths) {
       val haplotype = new Haplotype(path.asHaplotypeString)
-      haplotype.scoreReadsProbability(hmm, region)
+      haplotype.scoreReadsLikelihood(hmm, region)
       ordered_haplotypes.enqueue(haplotype)
     }
 
     // Pick the top X-1 haplotypes and the reference haplotype.
-    // TODO(peter, 12/7) This is _purely_ a premature optimization to save what
-    // might not even take that much time.
     val max_num_best_haplotypes = 16
     val num_best_haplotypes = min(max_num_best_haplotypes, ordered_haplotypes.length)
     var best_haplotypes = new ArrayBuffer[Haplotype]
@@ -650,23 +712,84 @@ class ReadCallAssemblyPhaser extends ReadCall {
     }
 
     // Score the haplotypes pairwise inclusively.
+    var ref_haplotype_pair: HaplotypePair = null
     var ordered_haplotype_pairs = new PriorityQueue[HaplotypePair]()(HaplotypePairOrdering)
     for (i <- 0 to best_haplotypes.length) {
       for (j <- 0 to (i + 1)) {
         var pair = new HaplotypePair(best_haplotypes(i), best_haplotypes(j))
-        pair.scorePairProbability(hmm, region)
+        pair.scorePairLikelihood(hmm, region)
         ordered_haplotype_pairs.enqueue(pair)
+        if (i == 0 && j == 0) {
+          ref_haplotype_pair = pair
+        }
       }
     }
 
-    // There can be only one!
-    var called_haplotype_pair = ordered_haplotype_pairs.dequeue
-    var called_haplotype1 = called_haplotype_pair.haplotype1
-    var called_haplotype2 = called_haplotype_pair.haplotype2
+    // Pick the best haplotype pairs with and without indels.
+    val (called_haplotype_pair, uncalled_haplotype_pair) = {
+      var called_res: HaplotypePair = null
+      var uncalled_res: HaplotypePair = null
+      do {
+        val res = ordered_haplotype_pairs.dequeue
+        res.alignToReference(hmm, ref_haplotype) match {
+          case true => {
+            if (called_res == null) {
+              called_res = res
+            }
+          }
+          case false => {
+            if (uncalled_res == null) {
+              uncalled_res = res
+            }
+          }
+        }
+      } while ((called_res == null || uncalled_res == null) && ordered_haplotype_pairs.length > 0)
+      // TODO(peter, 12/8) this ought to be a pathological bug if it ever
+      // happens (i.e., the ref-ref pair counts as having variants).
+      // On the other hand, there might not be any valid variant haplotypes.
+      // (FIXME: Really I should be using Option[].)
+      if (uncalled_res == null) {
+        uncalled_res = ref_haplotype_pair
+      }
+      (called_res, uncalled_res)
+    }
+
+    // Compute the variant error probability and the equivalent phred score.
+    val variant_error_prob = if (called_haplotype_pair != null) {
+      val called_probability = pow(10.0, called_haplotype_pair.pair_likelihood)
+      val uncalled_probability = pow(10.0, uncalled_haplotype_pair.pair_likelihood)
+      uncalled_probability / (called_probability + uncalled_probability)
+    } else {
+      1.0
+    }
+    val variant_phred = Phred.probabilityToPhred(variant_error_prob)
 
     // TODO(peter, 12/7) call variants.
-    var variants = new ArrayBuffer[(ADAMVariant, List[ADAMGenotype])]
-    variants
+    if (called_haplotype_pair != null) {
+      var variants = new ArrayBuffer[(ADAMVariant, List[ADAMGenotype])]
+      val called_haplotype1 = called_haplotype_pair.haplotype1
+      val called_haplotype2 = called_haplotype_pair.haplotype2
+      /*val genotype = ADAMGenotype.newBuilder
+          .setSampleId()
+          .setGenotype()
+          .setPhredLikelihoods(variant_phred.toString)
+          .build
+      */
+      /*val variant = ADAMVariant.newBuilder
+          .setReferenceName()
+          .setStartPosition()
+          .setReferenceAllele()
+          .setAlternateAlleles()
+          .setAlleleCount()
+          .setType()
+          .build
+      */
+      //variants += (variant, List[ADAMGenotype](genotype))
+      variants
+    }
+    else {
+      List()
+    }
   }
 
   /**
