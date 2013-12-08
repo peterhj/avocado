@@ -58,7 +58,7 @@ class HMMAligner {
   val match_to_indel = q
   val indel_to_indel = q
 
-  def setup(_ref: String, _test: String, _ref_start: Int): Unit = {
+  def setupHaplotypes(_ref: String, _test: String, _ref_start: Int): Unit = {
     ref_haplotype = _ref
     test_haplotype = _test
 
@@ -83,7 +83,8 @@ class HMMAligner {
                                               // the ref length.
   }
 
-  def computeLogLikelihood(): Double = {
+  // Compute the (log10) likelihood of aligning the test sequence to the ref.
+  def computeLikelihood(): Double = {
     // TODO(peter, 12/4) shortcut b/w global and local alignment: use a custom
     // start position in the reference haplotype.
     matches(ref_start) = 2.0 * eta
@@ -132,8 +133,8 @@ class HMMAligner {
 
   def computeAlignment(): Unit = {
     // TODO(peter, 12/4) just make a cigar string?
-    for (i <- 1 to padded_test_len) {
-      for (j <- (ref_start + 1) to padded_ref_len) {
+    for (i <- 0 to padded_test_len) {
+      for (j <- ref_start to padded_ref_len) {
         val idx = i * stride + j
         val t = trace(idx)
         t match {
@@ -196,11 +197,11 @@ class KmerPath (_edges: ArrayBuffer[Kmer]) {
 object KmerPathOrdering extends Ordering[KmerPath] {
   def compare(path1: KmerPath, path2: KmerPath): Int = {
     // Kmer paths are ordered by increasing mult sum.
-    if (path1.mult_sum < path2.mult_sum) {
-      return 1
-    }
-    else if (path1.mult_sum > path2.mult_sum) {
+    if (path1.mult_sum > path2.mult_sum) {
       return -1
+    }
+    else if (path1.mult_sum < path2.mult_sum) {
+      return 1
     }
     0
   }
@@ -399,15 +400,48 @@ class KmerGraph (_klen: Int, _region_len: Int) {
 
 class Haplotype (_string: String) {
   val string = _string
+  var reads_likelihood = Double.NegativeInfinity
 
-  def scoreReadsLikelihood(reads: Seq[ADAMRecord]): Double = {
-    // TODO(peter, 12/6)
-    Double.NegativeInfinity
+  def scoreReadsLikelihood(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
+    for (r <- reads) {
+      // TODO(peter, 12/6) ref offset?
+      hmm.setupHaplotypes(string, r.getSequence.toString, 0)
+      reads_likelihood = hmm.computeLikelihood
+    }
+    reads_likelihood
   }
+}
 
-  def scorePairwiseLikelihood(other: Haplotype): Double = {
-    // TODO(peter, 12/6)
-    Double.NegativeInfinity
+object HaplotypeOrdering extends Ordering[Haplotype] {
+  def compare(h1: Haplotype, h2: Haplotype): Int = {
+    // Haplotypes are ordered by decreasing reads likelihood, assuming they
+    // come from the same read group.
+    if (h1.reads_likelihood > h2.reads_likelihood) {
+      return -1
+    }
+    else if (h1.reads_likelihood < h2.reads_likelihood) {
+      return 1
+    }
+    0
+  }
+}
+
+class HaplotypePair (_h1: Haplotype, _h2: Haplotype) {
+  var haplotype1 = _h1
+  var haplotype2 = _h2
+  var pairwise_likelihood = Double.NegativeInfinity
+
+  def scorePairwiseLikelihood(hmm: HMMAligner, reads: Seq[ADAMRecord]): Double = {
+    // TODO(peter, 12/6) two parts to the likelihood:
+    // 1. joint prob w.r.t. read group
+    // 2. prior prob w.r.t. alignment b/w haplotypes
+    pairwise_likelihood
+  }
+}
+
+object HaplotypePairOrdering extends Ordering[HaplotypePair] {
+  def compare(pair1: HaplotypePair, pair2: HaplotypePair): Int = {
+    0
   }
 }
 
@@ -489,11 +523,11 @@ class ReadCallAssemblyPhaser extends ReadCall {
       //                         [---read---)
       val rel_pos = pos - start_pos
       val offset = reference.length - rel_pos.toInt
-      if (offset < 0) {
-        return ""
-      }
-      else if (offset >= 0) {
+      if (offset >= 0) {
         reference += ref.substring(offset, ref.length)
+      }
+      else if (offset < 0) {
+        return ""
       }
     }
     reference
@@ -504,8 +538,8 @@ class ReadCallAssemblyPhaser extends ReadCall {
     val active_likelihood_thresh = -2.0
     var hmm = new HMMAligner
     for (r <- region) {
-      hmm.setup(ref, r.getSequence.toString, 0)
-      val read_likelihood = hmm.computeLogLikelihood
+      hmm.setupHaplotypes(ref, r.getSequence.toString, 0)
+      val read_likelihood = hmm.computeLikelihood
       if (read_likelihood < active_likelihood_thresh) {
         return true
       }
@@ -524,16 +558,51 @@ class ReadCallAssemblyPhaser extends ReadCall {
     kmer_graph
   }
 
+  /**
+   * Phasing the assembled haplotypes to call variants. See:
+   *
+   * C.A. Albers, G. Lunter, D.G. MacArthur, G. McVean, W.H. Ouwehand, R. Durbin.
+   * "Dindel: Accurate indel calls from short-read data." Genome Research 21 (2011).
+   */
   def phaseAssembly(region: Seq[ADAMRecord], kmer_graph: KmerGraph, ref: String): Seq[(ADAMVariant, List[ADAMGenotype])] = {
-    var variants = new ArrayBuffer[(ADAMVariant, List[ADAMGenotype])]
-    // TODO(peter, 12/6) first pass of haplotype calling thing:
-    // 1. score all haplotypes, pick the top ~10
-    // 2. compute all pairwise scores of the remaining + reference to phase
-    //    (check out the Dindel paper for details)
+    var ref_haplotype = new Haplotype(ref)
+
+    // Score the all haplotypes.
     var hmm = new HMMAligner
+    ref_haplotype.scoreReadsLikelihood(hmm, region)
+    var ordered_haplotypes = new PriorityQueue[Haplotype]()(HaplotypeOrdering)
     for (path <- kmer_graph.getAllPaths) {
       val haplotype = new Haplotype(path.asHaplotypeString)
+      haplotype.scoreReadsLikelihood(hmm, region)
+      ordered_haplotypes.enqueue(haplotype)
     }
+
+    // Pick the top X-1 haplotypes and the reference haplotype.
+    val max_num_best_haplotypes = 16
+    val num_best_haplotypes = min(max_num_best_haplotypes, ordered_haplotypes.length)
+    var best_haplotypes = new ArrayBuffer[Haplotype]
+    best_haplotypes += ref_haplotype
+    for (i <- 1 to num_best_haplotypes) {
+      best_haplotypes += ordered_haplotypes.dequeue
+    }
+
+    // Score the haplotypes pairwise inclusively.
+    var ordered_haplotype_pairs = new PriorityQueue[HaplotypePair]()(HaplotypePairOrdering)
+    for (i <- 0 to best_haplotypes.length) {
+      for (j <- 0 to (i + 1)) {
+        var pair = new HaplotypePair(best_haplotypes(i), best_haplotypes(j))
+        pair.scorePairwiseLikelihood(hmm, region)
+        ordered_haplotype_pairs.enqueue(pair)
+      }
+    }
+
+    // There can be only one!
+    var called_haplotype_pair = ordered_haplotype_pairs.dequeue
+    var called_haplotype1 = called_haplotype_pair.haplotype1
+    var called_haplotype2 = called_haplotype_pair.haplotype2
+
+    // TODO(peter, 12/7) call variants.
+    var variants = new ArrayBuffer[(ADAMVariant, List[ADAMGenotype])]
     variants
   }
 
