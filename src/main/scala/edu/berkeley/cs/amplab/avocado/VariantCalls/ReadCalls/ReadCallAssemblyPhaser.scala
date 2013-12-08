@@ -25,137 +25,6 @@ import scala.collection.JavaConversions._
 import scala.collection.mutable.{ArrayBuffer, Buffer, HashMap, HashSet, PriorityQueue, StringBuilder}
 import scala.math._
 
-/**
- * Pairwise alignment HMM. See the Durbin textbook (1998), chapter 4.
- */
-class HMMAligner {
-  var ref_sequence: String = null
-  var test_sequence: String = null
-  var test_qualities: String = null
-
-  var ref_offset = 0
-
-  var padded_ref_len = 0
-  var padded_test_len = 0
-
-  var stride = 0
-  var mat_size = 0
-
-  var eta = Double.NegativeInfinity
-
-  // TODO(peter, 12/7) I'm forgetting a factor of 3 somewhere...
-  val mismatch_prior = -3.0 - log10(3.0)
-  val match_prior = log10(1.0 - 1.0e-3)
-  val indel_prior = -4.0
-  val indel_to_match_prior = -4.0
-  val indel_to_indel_prior = -4.0
-
-  private var matches: ArrayBuffer[Double] = null
-  private var inserts: ArrayBuffer[Double] = null
-  private var deletes: ArrayBuffer[Double] = null
-
-  private var trace_matches: ArrayBuffer[Char] = null
-  private var trace_inserts: ArrayBuffer[Char] = null
-  private var trace_deletes: ArrayBuffer[Char] = null
-
-  private var alignment_likelihood = Double.NegativeInfinity
-  private var alignment_prior = Double.NegativeInfinity
-
-  //def alignSequences(_ref: String, _test: String, _ref_offset: Int): Unit = {
-  def alignSequences(_ref: String, _test: String, _test_quals: String): Unit = {
-    ref_sequence = _ref
-    test_sequence = _test
-    test_qualities = _test_quals
-
-    //ref_offset = _ref_offset
-
-    padded_ref_len = ref_sequence.length + 1
-    padded_test_len = test_sequence.length + 1
-
-    val old_mat_size = mat_size
-    stride = padded_ref_len
-    mat_size = max(mat_size, padded_test_len * padded_ref_len)
-
-    if (mat_size > old_mat_size) {
-      matches = new ArrayBuffer[Double](mat_size)
-      inserts = new ArrayBuffer[Double](mat_size)
-      deletes = new ArrayBuffer[Double](mat_size)
-    }
-
-    // Note: want to use the _test_ haplotype length here, not the ref length.
-    eta = -log10(1.0 + test_sequence.length)
-
-    // TODO(peter, 12/4) shortcut b/w global and local alignment: use a custom
-    // start position in the reference haplotype.
-    matches(0) = 2.0 * eta
-    inserts(0) = Double.NegativeInfinity
-    deletes(0) = Double.NegativeInfinity
-    for (i <- 0 to padded_test_len) {
-      //for (j <- 0 to (padded_ref_len - ref_offset)) {
-      for (j <- 0 to padded_ref_len) {
-        if (i > 0 || j > 0) {
-          val idx = i * stride + j
-
-          val m = if (i >= 1 && j >= 1) {
-            val test_base = test_sequence(i-1)
-            val ref_base = ref_sequence(j-1)
-            // TODO(peter, 12/7) there is a second constant term to the prior...
-            val prior = if (test_base == ref_base) {
-              match_prior / (indel_prior * indel_prior)
-            } else {
-              mismatch_prior / (indel_prior * indel_prior)
-            }
-            val m_match = matches((i-1) * stride + (j-1))
-            val m_insert = inserts((i-1) * stride + (j-1))
-            val m_delete = deletes((i-1) * stride + (j-1))
-            max(m_match, max(m_insert, m_delete)) + prior
-          } else {
-            Double.NegativeInfinity
-          }
-
-          val ins = if (i >= 1) {
-            val ins_match = matches((i-1) * stride + j) + indel_to_match_prior
-            val ins_insert = inserts((i-1) * stride + j) + indel_to_indel_prior
-            max(ins_match, ins_insert)
-          } else {
-            Double.NegativeInfinity
-          }
-
-          val del = if (j >= 1) {
-            val del_match = matches(i * stride + (j-1)) + indel_to_match_prior
-            val del_delete = deletes(i * stride + (j-1)) + indel_to_indel_prior
-            max(del_match, del_delete)
-          } else {
-            Double.NegativeInfinity
-          }
-
-          // TODO(peter, 12/7) backtracking pointers
-
-          matches(idx) = m
-          inserts(idx) = ins
-          deletes(idx) = del
-        }
-      }
-    }
-    alignment_likelihood = max(matches(mat_size - 1), max(inserts(mat_size - 1), deletes(mat_size - 1)))
-  }
-
-  // Compute the (log10) likelihood of aligning the test sequence to the ref.
-  def getLikelihood(): Double = {
-    alignment_likelihood
-  }
-
-  // Compute the (log10) prior prob of observing the given alignment.
-  // This uses the quick and dirty numbers from the Dindel (2011) paper.
-  def getPrior(): Double = {
-    alignment_prior
-  }
-
-  // Return the cigar string (or equivalent) for the given alignment.
-  def getAlignment(): Unit = {
-  }
-}
-
 // For our purposes, a read is a list of kmers.
 class AssemblyRead (_record: ADAMRecord) {
   val record = _record
@@ -404,6 +273,165 @@ class KmerGraph (_klen: Int, _region_len: Int) {
   }
 
   def getAllPaths(): PriorityQueue[KmerPath] = all_paths
+}
+
+/**
+ * Pairwise alignment HMM. See the Durbin textbook (1998), chapter 4.
+ */
+class HMMAligner {
+  var ref_sequence: String = null
+  var test_sequence: String = null
+  var test_qualities: String = null
+
+  var ref_offset = 0
+
+  var padded_ref_len = 0
+  var padded_test_len = 0
+
+  var stride = 0
+  var mat_size = 0
+
+  var eta = Double.NegativeInfinity
+
+  // This uses the quick and dirty numbers from the Dindel (2011) paper.
+  // TODO(peter, 12/7) I'm forgetting a factor of 3 somewhere...
+  val mismatch_prior = -3.0 - log10(3.0)
+  val match_prior = log10(1.0 - 1.0e-3)
+  val indel_prior = -4.0
+  val indel_to_match_prior = -4.0
+  val indel_to_indel_prior = -4.0
+
+  private var matches: ArrayBuffer[Double] = null
+  private var inserts: ArrayBuffer[Double] = null
+  private var deletes: ArrayBuffer[Double] = null
+
+  private var trace_matches: ArrayBuffer[Char] = null
+  private var trace_inserts: ArrayBuffer[Char] = null
+  private var trace_deletes: ArrayBuffer[Char] = null
+
+  private var alignment_likelihood = Double.NegativeInfinity
+  private var alignment_prior = Double.NegativeInfinity
+
+  //def alignSequences(_ref: String, _test: String, _ref_offset: Int): Unit = {
+  def alignSequences(_ref: String, _test: String, _test_quals: String): Unit = {
+    ref_sequence = _ref
+    test_sequence = _test
+    test_qualities = _test_quals
+
+    //ref_offset = _ref_offset
+
+    padded_ref_len = ref_sequence.length + 1
+    padded_test_len = test_sequence.length + 1
+
+    val old_mat_size = mat_size
+    stride = padded_ref_len
+    mat_size = max(mat_size, padded_test_len * padded_ref_len)
+
+    if (mat_size > old_mat_size) {
+      matches = new ArrayBuffer[Double](mat_size)
+      inserts = new ArrayBuffer[Double](mat_size)
+      deletes = new ArrayBuffer[Double](mat_size)
+      trace_matches = new ArrayBuffer[Char](mat_size)
+      trace_inserts = new ArrayBuffer[Char](mat_size)
+      trace_deletes = new ArrayBuffer[Char](mat_size)
+    }
+
+    // Note: want to use the _test_ haplotype length here, not the ref length.
+    eta = -log10(1.0 + test_sequence.length)
+
+    // TODO(peter, 12/4) shortcut b/w global and local alignment: use a custom
+    // start position in the reference haplotype.
+    matches(0) = 2.0 * eta
+    inserts(0) = Double.NegativeInfinity
+    deletes(0) = Double.NegativeInfinity
+    for (i <- 0 to padded_test_len) {
+      //for (j <- 0 to (padded_ref_len - ref_offset)) {
+      for (j <- 0 to padded_ref_len) {
+        if (i > 0 || j > 0) {
+          // TODO(peter, 12/7) backtracking pointers
+          val (m, tr_m) = if (i >= 1 && j >= 1) {
+            val test_base = test_sequence(i-1)
+            val ref_base = ref_sequence(j-1)
+            // TODO(peter, 12/7) there is a second constant term to the prior...
+            val prior = if (test_base == ref_base) {
+              match_prior / (indel_prior * indel_prior)
+            } else {
+              mismatch_prior / (indel_prior * indel_prior)
+            }
+            val idx = (i-1) * stride + (j-1)
+            val m_match = matches(idx)
+            val m_insert = inserts(idx)
+            val m_delete = deletes(idx)
+            val m = max(m_match, max(m_insert, m_delete)) + prior
+            val t = if (m == m_match) {
+              'M'
+            } else if (m == m_insert) {
+              'I'
+            } else if (m == m_delete) {
+              'D'
+            } else {
+              '.'
+            }
+            (m, t)
+          } else {
+            (Double.NegativeInfinity, '.')
+          }
+          val (ins, tr_ins) = if (i >= 1) {
+            val idx = (i-1) * stride + j
+            val ins_match = matches(idx) + indel_to_match_prior
+            val ins_insert = inserts(idx) + indel_to_indel_prior
+            val ins = max(ins_match, ins_insert)
+            val t = if (ins == ins_match) {
+              'M'
+            }
+            else if (ins == ins_insert) {
+              'I'
+            } else {
+              '.'
+            }
+            (ins, t)
+          } else {
+            (Double.NegativeInfinity, '.')
+          }
+          val (del, tr_del) = if (j >= 1) {
+            val idx = i * stride + (j-1)
+            val del_match = matches(idx) + indel_to_match_prior
+            val del_delete = deletes(idx) + indel_to_indel_prior
+            val del = max(del_match, del_delete)
+            val t = if (del == del_match) {
+              'M'
+            }
+            else if (del == del_delete) {
+              'D'
+            } else {
+              '.'
+            }
+            (del, t)
+          } else {
+            (Double.NegativeInfinity, '.')
+          }
+          val idx = i * stride + j
+          matches(idx) = m
+          inserts(idx) = ins
+          deletes(idx) = del
+          trace_matches(idx) = tr_m
+          trace_inserts(idx) = tr_ins
+          trace_deletes(idx) = tr_del
+        }
+      }
+    }
+    alignment_likelihood = max(matches(mat_size - 1), max(inserts(mat_size - 1), deletes(mat_size - 1)))
+  }
+
+  // Compute the (log10) likelihood of aligning the test sequence to the ref.
+  def getLikelihood(): Double = alignment_likelihood
+
+  // Compute the (log10) prior prob of observing the given alignment.
+  def getPrior(): Double = alignment_prior
+
+  // Return the cigar string (or equivalent) for the given alignment.
+  def getAlignment(): Unit = {
+  }
 }
 
 class Haplotype (_sequence: String) {
