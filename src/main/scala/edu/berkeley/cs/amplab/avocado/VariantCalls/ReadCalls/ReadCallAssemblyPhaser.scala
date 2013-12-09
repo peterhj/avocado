@@ -916,7 +916,7 @@ class ReadCallAssemblyPhaser extends ReadCall {
     active_regions.flatMap(x => {
       val ref = x._1
       val region = x._2
-      if (region.length > 0) {
+      if (ref.length > 0 && region.length > 0) {
         val kmer_graph = assemble(region)
         phaseAssembly(region, kmer_graph, ref)
       }
