@@ -716,9 +716,9 @@ class ReadCallAssemblyPhaser extends ReadCall {
     reads_likelihood < active_likelihood_thresh
   }
 
-  def assemble(region: Seq[ADAMRecord]): KmerGraph = {
+  def assemble(region: Seq[ADAMRecord], ref: String): KmerGraph = {
     val read_len = region(0).getSequence.length
-    val region_len = region_window + read_len - 1
+    val region_len = min(region_window + read_len - 1, ref.length)
     var kmer_graph = new KmerGraph(kmer_len, read_len, region_len)
     kmer_graph.insertReads(region)
     kmer_graph.connectGraph
@@ -920,7 +920,7 @@ class ReadCallAssemblyPhaser extends ReadCall {
       val ref = x._1
       val region = x._2
       if (ref.length > 0 && region.length > 0) {
-        val kmer_graph = assemble(region)
+        val kmer_graph = assemble(region, ref)
         phaseAssembly(region, kmer_graph, ref)
       }
       else {
