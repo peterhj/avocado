@@ -75,10 +75,10 @@ class KmerPath (_edges: ArrayBuffer[Kmer]) {
 object KmerPathOrdering extends Ordering[KmerPath] {
   // Kmer paths are ordered by increasing mult sum.
   def compare(path1: KmerPath, path2: KmerPath): Int = {
-    if (path1.mult_sum > path2.mult_sum) {
+    if (path1.mult_sum < path2.mult_sum) {
       return -1
     }
-    else if (path1.mult_sum < path2.mult_sum) {
+    else if (path1.mult_sum > path2.mult_sum) {
       return 1
     }
     0
