@@ -91,8 +91,10 @@ object KmerPathOrdering extends Ordering[KmerPath] {
 //  var read2: AssemblyRead = _r2
 //}
 
-class KmerGraph (_klen: Int, _region_len: Int) {
+class KmerGraph (_klen: Int, _read_len: Int, _region_len: Int) {
   val klen = _klen
+  val read_len = _read_len
+  val region_len = _region_len
   val spur_threshold = klen // TODO(peter, 11/26) how to choose thresh?
 
   //var reads: HashMap[String,AssemblyRead] = null
@@ -113,7 +115,7 @@ class KmerGraph (_klen: Int, _region_len: Int) {
   def insertReadKmers(r: AssemblyRead): Unit = {
     // Construct L-K+1 kmers, initially connected to the source and sink.
     val read_seq = r.record.getSequence.toString
-    val read_len = read_seq.length
+    //val read_len = read_seq.length
     val offsets = ArrayBuffer.range(0, read_len - klen + 1)
     val ks = offsets.map(idx => {
       val prefix_str = read_seq.substring(idx, idx + klen - 1)
@@ -255,7 +257,8 @@ class KmerGraph (_klen: Int, _region_len: Int) {
 
   def enumerateAllPaths(): Unit = {
     // Do DFS to enumerate and score all paths through the final graph.
-    val max_depth = 400 - klen + 1
+    // TODO(peter, 12/9) arbitrary max assembly bound.
+    val max_depth = region_len + read_len - klen + 1
     var edges = new ArrayBuffer[Kmer]
     def allPathsDFS(v: KmerVertex, depth: Int): Unit = {
       if (v == sink) {
@@ -716,7 +719,7 @@ class ReadCallAssemblyPhaser extends ReadCall {
   def assemble(region: Seq[ADAMRecord]): KmerGraph = {
     val read_len = region(0).getSequence.length
     val region_len = region_window + read_len - 1
-    var kmer_graph = new KmerGraph(kmer_len, region_len)
+    var kmer_graph = new KmerGraph(kmer_len, read_len, region_len)
     kmer_graph.insertReads(region)
     kmer_graph.connectGraph
     //kmer_graph.removeSpurs // TODO(peter, 11/27) debug: not doing spur removal atm.
