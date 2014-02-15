@@ -16,12 +16,14 @@
 
 package edu.berkeley.cs.amplab.avocado.preprocessing
 
+import scala.Math
+//import scala.collection.JavaConversions._
 import scala.collection.mutable.ArrayBuffer
 import org.apache.commons.configuration.SubnodeConfiguration
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import edu.berkeley.cs.amplab.adam.avro.ADAMRecord
-import edu.berkeley.cs.amplab.avocado.assembly.KmerBuilder
+import edu.berkeley.cs.amplab.avocado.assembly.Kmer
 
 /**
  * Preprocessing stage for k-mer spectrum error correction.
@@ -31,51 +33,24 @@ import edu.berkeley.cs.amplab.avocado.assembly.KmerBuilder
  * 1. For each k, build a histogram of k-mer histogram multiplicities.
  * 2. Find the unique local minimum of each histogram and mark k-mers below it
  *    as "weak".
- * 3. Correct or throw away all reads containing "weak" k-mers.
+ * 3. Mark reads containing "weak" k-mers.
  */
 object SpectralErrorCorrection extends PreprocessingStage {
 
   val stageName = "spectralErrorCorrection"
 
   /**
-   * If possible, emit an error-corrected version of a read.
-   *
-   * @param[r]  a read
-   * @return    a list w/ the original read and possibly a corrected read
-   */
-  def keepOrCorrectRead(r: ADAMRecord): List[ADAMRecord] = {
-    if (!r.requiresErrorCorrection) {
-      return List[ADAMRecord](r)
-    }
-
-    var ec_read: ADAMRecord = r // FIXME clone this
-    var failed_ec = true
-
-    // TODO(peter, 2/14)
-    // Try to error-correct this read.
-
-    if (failed_ec) {
-      r.failedErrorCorrection = true
-      return List[ADAMRecord](r)
-    }
-    else {
-      ec_read.errorCorrected = true
-      return List[ADAMRecord](r, ec_read)
-    }
-  }
-
-  /**
    * Main method signature for a PreprocessingStage.
    *
    * @param[rdd]    an RDD of reads
    * @param[config] a SubnodeConfiguration
-   * @return        an RDD of error-corrected reads
+   * @return        an RDD of reads, with EC targets marked
    */
   def apply (rdd: RDD[ADAMRecord], config: SubnodeConfiguration): RDD[ADAMRecord] = {
     // Choose a list of k-mer sizes, and build k-mer multiplicity histograms.
-    val kmer_sizes = ArrayBuffer(16, 20, 24)
+    val kmer_sizes = ArrayBuffer(24)
     val kmer_mults_per_k = kmer_sizes.map(k =>
-      KmerBuilder.disjointKmersFromRDD(rdd, k)
+      Kmer.disjointKmersFromRDD(rdd, k)
         .map(kmer => (kmer, kmer.mult))
     )
     val mult_hists = kmer_mults_per_k.map(kmer_mults =>
@@ -111,18 +86,29 @@ object SpectralErrorCorrection extends PreprocessingStage {
     // Weak reads have at least one weak k-mer, and are pointed to by their
     // k-mers. Mark these weak reads.
     weak_kmers_per_k.map(weak_kmers => {
-      weak_kmers.flatMap(kmer => kmer.reads)
-                .map(r => { r.requiresErrorCorrection = true })
+      weak_kmers.map(kmer => {
+        val k = kmer.size
+        var valid_reads = (kmer.reads zip kmer.offsets).filter(x => !x._1.failedErrorCorrection)
+        valid_reads.map(x => { x._1.requiresErrorCorrection = true })
+
+        /*for (r <- kmer.reads) {
+          if (!r.failedErrorCorrection) {
+            r.requiresErrorCorrection = true
+            if (r.ecKmerOffsets == null || r.ecKmerSizes == null) {
+              r.ecKmerOffsets = new ArrayBuffer[java.lang.Integer]
+              r.ecKmerSizes = new ArrayBuffer[java.lang.Integer]
+            }
+            r.ecKmerOffsets += kmer.initialOffset
+            r.ecKmerSizes += kmer.size
+          }
+        }*/
+      })
     })
 
-    // Try to correct the weak reads, and, if successful, append the corrected
-    // version of the read to the RDD. Otherwise, mark the weak read as having
-    // failed error correction. No information about the reads is lost from the
-    // RDD; later stages can use as little or as much of the error correction
-    // info as they wish.
-    val corrected_rdd = rdd.flatMap(r => keepOrCorrectRead(r))
-
-    corrected_rdd
+    // Editing reads is hopeless because of the sheer amount of unique k-mers.
+    // Just return the reads, with some of them marked for future correction
+    // such as by consensus or by realignment.
+    rdd
   }
 
 }
