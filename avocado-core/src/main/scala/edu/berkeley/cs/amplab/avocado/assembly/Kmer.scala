@@ -16,8 +16,8 @@
 
 package edu.berkeley.cs.amplab.avocado.assembly
 
-import edu.berkeley.cs.amplab.adam.avro.ADAMRecord
 import scala.collection.mutable.ArrayBuffer
+import edu.berkeley.cs.amplab.adam.avro.ADAMRecord
 
 class Kmer (read: ADAMRecord, val string: String) {
 
@@ -30,6 +30,10 @@ class Kmer (read: ADAMRecord, val string: String) {
       case kmer: Kmer => string == kmer.string
       case _ => false
     }
+  }
+
+  def mult(): Int = {
+    reads.length
   }
 
 }

@@ -16,12 +16,12 @@
 
 package edu.berkeley.cs.amplab.avocado.preprocessing
 
+import scala.collection.mutable.ArrayBuffer
 import org.apache.commons.configuration.SubnodeConfiguration
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import edu.berkeley.cs.amplab.adam.avro.ADAMRecord
 import edu.berkeley.cs.amplab.avocado.assembly.KmerBuilder
-import scala.collection.mutable.ArrayBuffer
 
 /**
  * Preprocessing stage for k-mer spectrum error correction.
@@ -37,19 +37,52 @@ object SpectralErrorCorrection extends PreprocessingStage {
 
   val stageName = "spectralErrorCorrection"
 
+  /**
+   * If possible, emit an error-corrected version of a read.
+   *
+   * @param[r]  a read
+   * @return    a list w/ the original read and possibly a corrected read
+   */
+  def keepOrCorrectRead(r: ADAMRecord): List[ADAMRecord] = {
+    if (!r.requiresErrorCorrection) {
+      return List[ADAMRecord](r)
+    }
+
+    var ec_read: ADAMRecord = r // FIXME clone this
+    var failed_ec = true
+
+    // TODO(peter, 2/14)
+    // Try to error-correct this read.
+
+    if (failed_ec) {
+      r.failedErrorCorrection = true
+      return List[ADAMRecord](r)
+    }
+    else {
+      ec_read.errorCorrected = true
+      return List[ADAMRecord](r, ec_read)
+    }
+  }
+
+  /**
+   * Main method signature for a PreprocessingStage.
+   *
+   * @param[rdd]    an RDD of reads
+   * @param[config] a SubnodeConfiguration
+   * @return        an RDD of error-corrected reads
+   */
   def apply (rdd: RDD[ADAMRecord], config: SubnodeConfiguration): RDD[ADAMRecord] = {
     // Choose a list of k-mer sizes, and build k-mer multiplicity histograms.
     val kmer_sizes = ArrayBuffer(16, 20, 24)
     val kmer_mults_per_k = kmer_sizes.map(k =>
-        rdd.flatMap(r => KmerBuilder.disjointKmersFromRead(r, k)
-                                    .map(kmer => (kmer, 1)))
-           .reduceByKey(_ + _)
-        )
+      KmerBuilder.disjointKmersFromRDD(rdd, k)
+        .map(kmer => (kmer, kmer.mult))
+    )
     val mult_hists = kmer_mults_per_k.map(kmer_mults =>
-        kmer_mults.map(x => (x._2, 1.asInstanceOf[Long]))
-                  .reduceByKey(_ + _)
-                  .collect
-        )
+      kmer_mults.map(x => (x._2, 1.asInstanceOf[Long]))
+                .reduceByKey(_ + _)
+                .collect
+    )
 
     // Find the local minimum in each histogram. This is the breakpoint b/w
     // "strong" vs "weak" k-mers (to use ALLPATHS language).
@@ -67,20 +100,29 @@ object SpectralErrorCorrection extends PreprocessingStage {
     })
 
     // Weak k-mers have multiplicity _strictly_ less than the breakpoint.
-    // Weak reads have at least one weak k-mer, and are pointed to by their
-    // k-mers.
     val weak_kmers_per_k = (kmer_mults_per_k zip mult_breaks).map(pair => {
       val kmer_mults = pair._1
       val mult_break = pair._2
       val weak_kmers = kmer_mults.filter(x => x._2 < mult_break)
+                                 .map(x => x._1)
       weak_kmers
     })
 
-    // TODO(peter, 2/14)
-    // The output RDD is the union of "strong" reads and the .flatMap of our
-    // attempts to create error-corrected versions of "weak" reads.
+    // Weak reads have at least one weak k-mer, and are pointed to by their
+    // k-mers. Mark these weak reads.
+    weak_kmers_per_k.map(weak_kmers => {
+      weak_kmers.flatMap(kmer => kmer.reads)
+                .map(r => { r.requiresErrorCorrection = true })
+    })
 
-    rdd // FIXME(peter, 2/14)
+    // Try to correct the weak reads, and, if successful, append the corrected
+    // version of the read to the RDD. Otherwise, mark the weak read as having
+    // failed error correction. No information about the reads is lost from the
+    // RDD; later stages can use as little or as much of the error correction
+    // info as they wish.
+    val corrected_rdd = rdd.flatMap(r => keepOrCorrectRead(r))
+
+    corrected_rdd
   }
 
 }
