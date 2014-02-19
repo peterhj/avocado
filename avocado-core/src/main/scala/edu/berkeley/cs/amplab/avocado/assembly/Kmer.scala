@@ -64,10 +64,10 @@ object Kmer {
    * @return    an array of nonunique k-mer strings
    */
   def stringsFromRead (r: ADAMRecord, k: Int): ArrayBuffer[String] = {
-    val readlen = r.sequence.length
+    val readlen = r.getSequence.length
     var strings = new ArrayBuffer[String](readlen - k + 1)
     for (i <- 0 until readlen - k + 1) {
-      strings(i) = r.sequence.toString.substring(i, i + k)
+      strings(i) = r.getSequence.toString.substring(i, i + k)
     }
     strings
   }
@@ -80,11 +80,11 @@ object Kmer {
    * @param[k]  the k-mer size
    * @return    an array of nonunique and disjoint k-mers
    */
-  def disjointKmersFromRead (r: ADAMRecord, k: Int): ArrayBuffer[Kmer] = {
-    val readlen = r.sequence.length
+  def disjointDistinctKmersFromRead (r: ADAMRecord, k: Int): ArrayBuffer[Kmer] = {
+    val readlen = r.getSequence.length
     var kmers = new ArrayBuffer[Kmer](readlen - k + 1)
     for (i <- 0 until readlen - k + 1) {
-      val string = r.sequence.toString.substring(i, i + k)
+      val string = r.getSequence.toString.substring(i, i + k)
       kmers(i) = new Kmer(string, r, i)
     }
     kmers
@@ -114,7 +114,7 @@ object Kmer {
    * @return      an array of consolidated but disjoint kmers
    */
   def disjointKmersFromReads (rs: Seq[ADAMRecord], k: Int): ArrayBuffer[Kmer] = {
-    ArrayBuffer[Kmer](rs.flatMap(r => disjointKmersFromRead(r, k))
+    ArrayBuffer[Kmer](rs.flatMap(r => disjointDistinctKmersFromRead(r, k))
       .groupBy(kmer => kmer.string)
       .toSeq
       .map(x => consolidateEqualKmers(x._2)) : _*)
@@ -128,7 +128,7 @@ object Kmer {
    * @return      an RDD of consolidated but disjoint kmers
    */
   def disjointKmersFromRDD (rdd: RDD[ADAMRecord], k: Int): RDD[Kmer] = {
-    rdd.flatMap(r => disjointKmersFromRead(r, k))
+    rdd.flatMap(r => disjointDistinctKmersFromRead(r, k))
        .map(kmer => (kmer.string, kmer))
        .groupByKey
        .map(x => consolidateEqualKmers(x._2))

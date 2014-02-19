@@ -35,9 +35,9 @@ import edu.berkeley.cs.amplab.avocado.assembly.Kmer
  *    as "weak".
  * 3. Mark reads containing "weak" k-mers.
  */
-object SpectralErrorCorrection extends PreprocessingStage {
+object ErrorCorrection extends PreprocessingStage {
 
-  val stageName = "spectralErrorCorrection"
+  val stageName = "errorCorrection"
 
   /**
    * Main method signature for a PreprocessingStage.
@@ -88,8 +88,8 @@ object SpectralErrorCorrection extends PreprocessingStage {
     weak_kmers_per_k.map(weak_kmers => {
       weak_kmers.map(kmer => {
         val k = kmer.size
-        var valid_reads = (kmer.reads zip kmer.offsets).filter(x => !x._1.failedErrorCorrection)
-        valid_reads.map(x => { x._1.requiresErrorCorrection = true })
+        var valid_reads = (kmer.reads zip kmer.offsets).filter(x => !x._1.getFailedErrorCorrection)
+        valid_reads.map(x => x._1.setRequiresErrorCorrection(true))
 
         /*for (r <- kmer.reads) {
           if (!r.failedErrorCorrection) {

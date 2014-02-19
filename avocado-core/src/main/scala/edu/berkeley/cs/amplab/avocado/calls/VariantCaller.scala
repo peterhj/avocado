@@ -22,14 +22,15 @@ import edu.berkeley.cs.amplab.adam.avro.{ADAMRecord, ADAMPileup, ADAMVariant, AD
 import edu.berkeley.cs.amplab.adam.models.ADAMVariantContext
 import edu.berkeley.cs.amplab.adam.rdd.AdamContext._
 import edu.berkeley.cs.amplab.avocado.calls.pileup.{PileupCallSimpleSNP, PileupCallUnspecified}
-import edu.berkeley.cs.amplab.avocado.calls.reads.{ReadCallAssemblyPhaser, ReadCallUnspecified}
+//import edu.berkeley.cs.amplab.avocado.calls.reads.{ReadCallAssemblyPhaser, ReadCallUnspecified}
+import edu.berkeley.cs.amplab.avocado.calls.reads.ReadCallUnspecified
 import edu.berkeley.cs.amplab.avocado.stats.AvocadoConfigAndStats
 
 object VariantCaller {
 
   private val calls = List(PileupCallSimpleSNP,
                            PileupCallUnspecified,
-                           ReadCallAssemblyPhaser,
+                           //ReadCallAssemblyPhaser,
                            ReadCallUnspecified)
 
   def apply (callName: String,

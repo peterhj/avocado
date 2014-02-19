@@ -18,17 +18,21 @@ package edu.berkeley.cs.amplab.avocado.stats
 
 import org.apache.spark.SparkContext
 import org.apache.spark.rdd.RDD
-import edu.berkeley.cs.amplab.adam.avro.{ADAMRecord, ADAMFastaNucleotideContig}
+import edu.berkeley.cs.amplab.adam.avro.{ADAMRecord, ADAMNucleotideContig}
 
 class AvocadoConfigAndStats (val sc: SparkContext,
                              val debug: Boolean, 
                              inputDataset: RDD[ADAMRecord],
-                             reference: RDD[ADAMFastaNucleotideContig]) {
+                             reference: RDD[ADAMNucleotideContig]) {
+
+  lazy val readLength = inputDataset.first.getSequence.length
+
+  lazy val insertDist = InsertDist(inputDataset)
   
   lazy val coverage = ScoreCoverage(inputDataset)
 
   lazy val contigLengths = GetReferenceContigLengths(reference)
-  
+
   lazy val referenceSeq = reference.collect()
 
   lazy val samplesInDataset = inputDataset.map(_.getRecordGroupSample)
